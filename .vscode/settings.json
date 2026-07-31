@@ -1,0 +1,15 @@
+{
+    "// nota": "Projeto usa PlatformIO + Arduino (ver docs/02-ambiente-dev.md). As chaves idf.* ficam para conviver com a extensao ESP-IDF, mas nao sao o caminho de build.",
+    "idf.customExtraVars": {},
+    "idf.currentSetup": "C:\\esp\\v6.0.2\\esp-idf",
+    "idf.openOcdConfigs": [
+        "board/esp32s3-builtin.cfg"
+    ],
+    "files.associations": {
+        "*.ino": "cpp"
+    },
+    "files.exclude": {
+        "**/.pio": true
+    },
+    "C_Cpp.default.cppStandard": "c++17"
+}

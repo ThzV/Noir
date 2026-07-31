@@ -1,0 +1,11 @@
+# Tabela de particoes do Noir OS  -  flash de 8 MB (ESP32-S3FN8)
+# Espelha o esquema do Bruce: NVS + OTA (2 slots de app) + LittleFS (assets).
+# Cada slot de app tem ~3.19 MB, o que sobra e' generoso para o firmware.
+#
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0x9000,    0x5000,
+otadata,    data, ota,      0xe000,    0x2000,
+app0,       app,  ota_0,    0x10000,   0x330000,
+app1,       app,  ota_1,    0x340000,  0x330000,
+spiffs,     data, spiffs,   0x670000,  0x180000,
+coredump,   data, coredump, 0x7F0000,  0x10000,
