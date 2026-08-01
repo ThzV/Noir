@@ -282,8 +282,18 @@ bool lerNumero(const char* titulo, double& out) {
 String fmtNum(double v) {
     char b[32];
     double a = std::fabs(v);
-    if (a != 0 && (a < 0.001 || a >= 1e7)) std::snprintf(b, sizeof(b), "%.4g", v);
-    else                                   std::snprintf(b, sizeof(b), "%.4f", v);
+    if (a != 0 && a < 0.001) {
+        std::snprintf(b, sizeof(b), "%.4g", v);      // muito pequeno: cientifica
+    } else if (a >= 1e7) {
+        // Valores grandes: se o numero for inteiro (ex.: 1GB -> 1073741824 B),
+        // imprimimos todos os digitos com "%.0f" em vez de "%.4g" (que viraria
+        // "1.074e+09" arredondado). So caimos em cientifica quando de fato nao
+        // cabe com precisao (magnitude alem do inteiro exato do double).
+        if (a < 1e15 && v == std::floor(v)) std::snprintf(b, sizeof(b), "%.0f", v);
+        else                                std::snprintf(b, sizeof(b), "%.4g", v);
+    } else {
+        std::snprintf(b, sizeof(b), "%.4f", v);
+    }
     String s(b);
     // remove zeros a' direita (e o ponto se sobrar) para "12.5000" -> "12.5"
     if (s.indexOf('.') >= 0 && s.indexOf('e') < 0 && s.indexOf('E') < 0) {
@@ -397,7 +407,7 @@ void pomodoroConfig() {
         else if (e.key == Key::Right) { vals[sel] += its[sel].passo; if (vals[sel] > its[sel].mx) vals[sel] = its[sel].mx; }
         else if (e.key == Key::Enter) {
             for (int i = 0; i < N; i++) noir::config::setInt(its[i].key, vals[i]);
-            ui::redStripe("Config salva", 800);
+            ui::banner("Pomodoro", "Config salva");   // feedback neutro (nao-perigo)
             return;
         }
         else if (e.key == Key::Back) return;
@@ -436,10 +446,14 @@ void pomodoroRun() {
     M5Canvas& d = gfx();
 
     // Avanca para a proxima fase (com beep e "flash" da tela).
-    auto proximaFase = [&]() {
+    //  natural=true  -> o tempo chegou a zero (foco concluido de verdade):
+    //                   conta o pomodoro e permite cadenciar a pausa longa.
+    //  natural=false -> usuario pulou (SPACE): apenas troca de fase, sem inflar
+    //                   o contador nem antecipar a pausa longa.
+    auto proximaFase = [&](bool natural = true) {
         if (fase == Fase::Foco) {
-            pomos++;
-            fase = (pomos % every == 0) ? Fase::PausaLonga : Fase::PausaCurta;
+            if (natural) pomos++;
+            fase = (natural && pomos % every == 0) ? Fase::PausaLonga : Fase::PausaCurta;
             beep(880, 140); delay(150); beep(1175, 220);   // "subida" ao descansar
         } else {
             fase = Fase::Foco;
@@ -498,7 +512,7 @@ void pomodoroRun() {
         // --- Teclado (nao bloqueante) ---
         KeyEvent e = ui::readKey();
         if (e.key == Key::Enter) { running = !running; lastTick = millis(); }
-        else if (e.key == Key::Space) proximaFase();
+        else if (e.key == Key::Space) proximaFase(false);   // pular nao conta pomodoro
         else if (e.key == Key::Back)  { M5.Speaker.stop(); return; }
 
         delay(30);
@@ -541,16 +555,17 @@ int diasNoMes(int ano, int mes /*0-11*/) {
     if (mes == 1 && bissexto(ano)) return 29;
     return dm[mes];
 }
-// Dia da semana (0=Dom..6=Sab) do dia 1 do mes, via mktime (normaliza tm_wday).
+// Dia da semana (0=Dom..6=Sab) do dia 1 do mes, via algoritmo de Sakamoto.
+// Evitamos mktime() de proposito: com time_t de 32 bits (Arduino/ESP32) datas
+// alem de 2038 estouram e mktime devolve -1, deixando tm_wday com lixo e
+// deslocando o mes inteiro. Sakamoto e' puramente aritmetico e vale p/ qualquer
+// ano do calendario gregoriano.
 int diaSemanaDia1(int ano, int mes /*0-11*/) {
-    struct tm t = {};
-    t.tm_year = ano - 1900;
-    t.tm_mon  = mes;
-    t.tm_mday = 1;
-    t.tm_hour = 12;          // meio-dia evita ambiguidades de horario de verao
-    t.tm_isdst = -1;
-    mktime(&t);              // preenche tm_wday
-    return t.tm_wday;
+    static const int t[] = {0,3,2,5,0,3,5,1,4,6,2,4};
+    int y = ano;
+    int m = mes + 1;                 // 1-12
+    if (m < 3) y -= 1;               // jan/fev contam no ano anterior
+    return (y + y/4 - y/100 + y/400 + t[m-1] + 1) % 7;   // dia 1 do mes
 }
 
 void appCalendario() {
@@ -619,11 +634,13 @@ void appCalendario() {
         drawHints(", / mes   ; . ano   ` sai");
         ui::present();
 
+        // Limites de ano p/ manter o calendario sao (1970..2099).
+        const int ANO_MIN = 1970, ANO_MAX = 2099;
         KeyEvent e = ui::waitKey();
-        if (e.key == Key::Left)  { if (--mes < 0)  { mes = 11; ano--; } }
-        else if (e.key == Key::Right) { if (++mes > 11) { mes = 0; ano++; } }
-        else if (e.key == Key::Up)    ano++;
-        else if (e.key == Key::Down)  ano--;
+        if (e.key == Key::Left)  { if (--mes < 0)  { if (ano > ANO_MIN) { mes = 11; ano--; } else mes = 0; } }
+        else if (e.key == Key::Right) { if (++mes > 11) { if (ano < ANO_MAX) { mes = 0; ano++; } else mes = 11; } }
+        else if (e.key == Key::Up)    { if (ano < ANO_MAX) ano++; }
+        else if (e.key == Key::Down)  { if (ano > ANO_MIN) ano--; }
         else if (e.key == Key::Back)  return;
     }
 }

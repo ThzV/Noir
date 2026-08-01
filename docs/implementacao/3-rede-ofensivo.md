@@ -77,10 +77,19 @@ legal. Consentimento **por ação**, nunca genérico.
   varrer o espectro, já que a promiscuidade só escuta um canal por vez.
 - **.pcap opcional no SD:** o callback **não** escreve no cartão (I/O em contexto
   de task de rádio é perigoso). Em vez disso empurra uma cópia truncada
-  (`SNAP_LEN=256`) numa **fila FreeRTOS** (`xQueueSendFromISR`, não bloqueante —
-  descarta se encher). O loop principal **drena** a fila e grava registros no
-  formato **libpcap** clássico (cabeçalho global + registros), `LINKTYPE 105`
-  (802.11 cru). O arquivo abre em Wireshark.
+  (`SNAP_LEN=256`) numa **fila FreeRTOS**. O callback roda na **task do WiFi**
+  (não em ISR), então usamos `xQueueSend(q, &slot, 0)` — não bloqueante, descarta
+  se encher. O loop principal **drena** a fila e grava registros no formato
+  **libpcap** clássico (cabeçalho global + registros), `LINKTYPE 105` (802.11 cru).
+  O arquivo abre em Wireshark.
+- **Timestamps:** cada registro usa `gettimeofday()` (epoch), não `micros()` —
+  `micros()` envelopa em ~71min de uptime e corromperia a linha do tempo do
+  `.pcap`. Com **sync NTP** (`core/time_service`) o horário é **absoluto**; sem
+  NTP é tempo **relativo** ao boot, mas monotônico e sem estouro.
+- **Teardown seguro:** ao sair, desligamos a promiscuidade, fechamos o arquivo e
+  só então liberamos a fila — **desarmando antes** o guardião (`g_logSd=false` e
+  `g_pktQueue=nullptr`) com uma pequena barreira, para o callback não usar a fila
+  durante o `vQueueDelete` (evita *use-after-free*).
 - Pinos do microSD do Cardputer v1.1 (SPI): `SCK=40 MISO=39 MOSI=14 CS=12`
   (confira em [`docs/01-hardware.md`](../01-hardware.md)).
 
@@ -115,6 +124,9 @@ legal. Consentimento **por ação**, nunca genérico.
   fraude/interceptação.
 - O loop bombeia `g_dns.processNextRequest()` **e** `g_web.handleClient()` a cada
   volta — esquecer um deles trava o portal.
+- As rotas (`g_web.on()/onNotFound()`) são registradas **uma única vez** (flag
+  `static`): esses métodos empilham handlers numa lista ligada no heap, então
+  re-registrar a cada entrada no app vazaria memória.
 
 ### 5) Deauth (perigo máximo)
 

@@ -89,8 +89,14 @@ Guardamos o ultimo resultado numa struct `WeatherState` **arquivo-local**
 sem refazer a requisicao HTTP. Buscamos da rede so:
 
 - na primeira vez (`everFetched == false`);
-- a cada ~10 minutos (`WEATHER_INTERVAL_MS`);
+- a cada ~10 minutos (`WEATHER_INTERVAL_MS`) quando o ultimo resultado foi `Ok`;
+- a cada ~60 segundos (`WEATHER_ERROR_INTERVAL_MS`) enquanto o estado for de
+  erro/sem-WiFi (backoff, ver "Tratamento de erros");
 - quando o usuario forca com a tecla `/` (mapeada como `Key::Right`).
+
+`maybeFetchWeather()` registra `lastFetch` no instante da **tentativa** (nao so
+no sucesso). Assim, mesmo um fetch que falha "consome" o intervalo e o backoff
+consegue segurar a proxima requisicao.
 
 ### A requisicao
 
@@ -101,7 +107,7 @@ String url = "https://api.openweathermap.org/data/2.5/weather?q=" +
              urlEncode(city) + "&units=" + units +
              "&lang=pt_br&appid=" + key;
 
-noir::net::Resp resp = noir::net::get(url, {}, true, 6000);   // timeout 6s
+noir::net::Resp resp = noir::net::get(url, {}, false, 6000);  // TLS valido, 6s
 if (!resp.ok()) { /* status = Error */ }
 
 JsonDocument doc;
@@ -116,10 +122,14 @@ Pontos importantes:
   `%20` na query. Escrevemos um encoder minimo que preserva letras/numeros e
   alguns simbolos (incluindo a virgula que separa cidade/pais) e percent-encoda
   o resto.
+- **TLS validado (`insecure=false`)**: `api.openweathermap.org` e' um host
+  publico com certificado de CA valido, entao validamos o cert (diferente de um
+  homelab com cert self-signed, onde usariamos `insecure=true`).
 - **Timeout curto (6 s)**: e' a tela inicial; nao queremos congelar por muito
   tempo. A requisicao e' bloqueante, mas acontece raramente (10 em 10 min).
-- **ArduinoJson na stack**: sem PSRAM, evitamos alocacoes grandes. O
-  `JsonDocument` vive so dentro da funcao e e' descartado ao sair.
+- **ArduinoJson v7 (heap)**: o `JsonDocument` do v7 aloca seus dados no heap
+  dinamicamente. Sem PSRAM isso preocuparia, mas o documento do clima e' pequeno,
+  vive so dentro da funcao e e' liberado ao sair.
 - **`| ""`**: o operador de "valor padrao" do ArduinoJson - se o campo faltar,
   usamos string vazia em vez de crashar.
 
@@ -137,6 +147,21 @@ Pontos importantes:
 
 Quando nao ha chave, **nem chamamos a API** - so ajustamos o status. Isso
 respeita o requisito de nao gastar rede a toa.
+
+**Backoff de erro (nao trave a tela):** um erro poderia virar uma "tempestade de
+retries". O GET e' bloqueante (ate' 6 s) e o loop chama `maybeFetchWeather` a
+cada ~1 s; se toda tentativa que falha deixasse a requisicao "vencida", o
+dashboard ficaria disparando GET a cada frame, congelando o relogio e o ENTER.
+Por isso: (1) so o estado `Ok` usa o intervalo de 10 min - erro/sem-WiFi usam
+`WEATHER_ERROR_INTERVAL_MS` (60 s); e (2) `lastFetch` marca a **tentativa**, nao
+o sucesso. Antes do GET bloqueante, o status vai para `Updating` e a tela e'
+redesenhada (via callback `onBeforeFetch`), para que "atualizando..." apareca de
+fato em vez de ser sobrescrito pelo resultado.
+
+**Truncamento UTF-8:** a linha `Ok` e' limitada a 30 bytes para nao estourar a
+largura. Como a descricao vem em `pt_br` (com acentos), cortamos numa **fronteira
+de caractere** - recuamos enquanto o byte no corte for uma continuacao UTF-8
+(`10xxxxxx`) - para nao deixar meio caractere e virar lixo na tela.
 
 ## App de configuracao "Clima"
 

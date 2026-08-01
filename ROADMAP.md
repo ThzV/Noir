@@ -4,6 +4,8 @@ A ordem sugerida para construir o Noir, do zero ao completo. Cada fase entrega a
 
 > Legenda de dificuldade: 🟢 tranquilo · 🟡 exige estudo · 🔴 desafiador
 
+> ✅ **Estado atual (v0.1):** o núcleo e **todos os módulos** das Fases 1–6 já estão **implementados e compilando** (`pio run` → `firmware.bin`). As fases abaixo permanecem como **mapa de aprendizado** e checklist de **endurecimento/validação em hardware** — muitos itens já têm código, faltando testar no Cardputer real e polir (Fase 7). Os guias do código que já existe estão em [docs/implementacao/](docs/implementacao/README.md).
+
 ---
 
 ## ✅ Fase 0 — Fundações (ESTE COMMIT)

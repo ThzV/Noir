@@ -47,8 +47,10 @@ Pontos importantes:
 
 - `SPI.begin(...)` so' precisa rodar **uma vez** (guardado no `static`). Chamar
   de novo poderia reconfigurar o barramento sem necessidade.
-- `SD.begin(12, SPI)` monta o cartao e e' seguro chamar toda vez que um app
-  inicia — isso permite trocar o cartao entre usos.
+- `SD.begin(12, SPI)` e' **cacheado**: uma vez montado, uma segunda chamada nao
+  re-monta e uma troca a quente/remocao do cartao passaria despercebida. Por isso
+  chamamos `SD.end()` **antes** de `SD.begin(...)`, forcando a re-montagem a cada
+  app — assim e' seguro trocar o cartao entre usos.
 - Se nao houver cartao, `SD.cardType()` devolve `CARD_NONE`. Nesse caso cada app
   chama `noCardMsg()` (um `ui::messageBox`) e retorna. **Nunca** presuma que o
   cartao existe.
@@ -89,7 +91,9 @@ constexpr size_t EDIT_LIMIT = 8 * 1024;   // 8 KB
 - Arquivos truncados **nao** sao editaveis: `openTextFile()` avisa e chama
   `viewText()`, um visualizador **somente-leitura** com rolagem pelas setas.
 - `saveFile()` grava com `SD.open(path, FILE_WRITE)`, que **trunca** o arquivo
-  (modo `"w"`) e regrava o buffer inteiro.
+  (modo `"w"`) e regrava o buffer inteiro. Usa `write()` e compara o retorno com
+  `buf.length()`: se o cartao encher, menos bytes sao gravados e `saveFile()`
+  devolve `false` — a UI mostra a falha em vez de um falso "Salvo".
 
 ### Como o editor le o teclado
 
@@ -122,6 +126,16 @@ Decisoes de design:
 
 O Editor (`appEditor`) pergunta com `ui::confirm` antes de gravar. As Notas
 (`appNotes`) fazem **autosave** — gravam sempre ao sair, sem perguntar.
+
+Duas protecoes contra **perda de dados**:
+
+- Ao criar em "Novo arquivo...", se o nome ja' existir o Editor **nao trunca**:
+  delega a `openTextFile()`, que carrega o conteudo, edita (ou mostra somente-
+  leitura se passar de 8 KB) e so' grava apos `ui::confirm`.
+- Em Notas, se `notas.txt` for maior que `EDIT_LIMIT`, `loadFile()` devolve
+  `false` (cauda truncada). O autosave gravaria so' os primeiros 8 KB e
+  **apagaria o resto**. Por isso, nesse caso, abrimos em `viewText()` (somente
+  leitura) e **nao** gravamos.
 
 ## Visualizador de imagens
 

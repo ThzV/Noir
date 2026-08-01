@@ -28,7 +28,10 @@
 
 #include <Arduino.h>
 #include <WiFi.h>          // WiFi.hostByName, WiFiClient (port scanner/DNS)
+#include <HTTPClient.h>       // speed test: le o corpo por streaming (sem bufferizar)
+#include <WiFiClientSecure.h> // speed test: TLS validado p/ host publico (https)
 #include <algorithm>
+#include <memory>
 #include <vector>
 
 // Bibliotecas externas (declaradas no manifesto de retorno; a integracao as
@@ -329,12 +332,23 @@ void appPortScanner() {
 
 // ---------------------------------------------------------------------------
 //  6) Speed test
-//      Baixa um recurso conhecido com noir::net::get() medindo bytes/tempo e
-//      estima os Mbps de download. A URL fica em config ("spd_url").
+//      Baixa um recurso conhecido e estima os Mbps de download. A URL fica em
+//      config ("spd_url").
 //
-//      ATENCAO (sem PSRAM): net::get() carrega o corpo INTEIRO numa String na
-//      RAM. Por isso o padrao baixa ~100KB (endpoint da Cloudflare que devolve
-//      exatamente o numero de bytes pedido). NAO aponte para arquivos grandes.
+//      NAO usamos noir::net::get() aqui: ele carrega o corpo INTEIRO numa String
+//      (via HTTPClient::getString()) e, com uma URL editavel apontando para um
+//      arquivo grande, isso estoura o heap (~320KB, sem PSRAM) ou trunca em
+//      silencio. Em vez disso, lemos o stream em blocos de ~2KB e apenas SOMAMOS
+//      os bytes, descartando o conteudo -> uso de RAM constante e qualquer
+//      tamanho de amostra e' seguro.
+//
+//      TLS: host padrao e' publico (speed.cloudflare.com), entao validamos o
+//      certificado (nao chamamos setInsecure()), igual ao caminho seguro do
+//      nucleo net::get(insecure=false).
+//
+//      Metodologia: o cronometro (t0) comeca DEPOIS de abrir o stream, ou seja,
+//      apos DNS + TCP + handshake TLS. Assim medimos so' a fase de transferencia
+//      e nao subestimamos os Mbps com o overhead de conexao.
 // ---------------------------------------------------------------------------
 void appSpeedTest() {
     if (!exigirWifi()) return;
@@ -352,21 +366,69 @@ void appSpeedTest() {
     if (nova != url) noir::config::setStr("spd_url", nova);   // persiste a escolha
     url = nova;
 
-    ui::progress("Speed test", "Baixando amostra...", 30);
+    ui::progress("Speed test", "Conectando...", 20);
 
-    uint32_t t0 = millis();
-    noir::net::Resp r = noir::net::get(url, {}, /*insecure=*/true, /*timeout=*/15000);
-    uint32_t dtMs = millis() - t0;
-    if (dtMs == 0) dtMs = 1;   // evita divisao por zero em links absurdamente rapidos
+    // Cliente proprio (nao net::get) para poder ler o corpo por streaming.
+    std::unique_ptr<WiFiClient> client;
+    if (url.startsWith("https")) {
+        client.reset(new WiFiClientSecure());   // valida o cert (sem setInsecure)
+    } else {
+        client.reset(new WiFiClient());
+    }
 
-    if (!r.ok()) {
-        ui::messageBox("Speed test",
-                       "Falha no download.\nHTTP: " + String(r.code) +
-                       "\n\nURL:\n" + url);
+    HTTPClient http;
+    http.setConnectTimeout(15000);
+    http.setTimeout(15000);
+    if (!http.begin(*client, url)) {
+        ui::messageBox("Speed test", "Falha ao conectar.\n\nURL:\n" + url);
         return;
     }
 
-    size_t bytes = r.body.length();
+    int code = http.GET();
+    if (code < 200 || code >= 300) {
+        ui::messageBox("Speed test",
+                       "Falha no download.\nHTTP: " + String(code) +
+                       "\n\nURL:\n" + url);
+        http.end();
+        return;
+    }
+
+    ui::progress("Speed test", "Baixando amostra...", 60);
+
+    // Le o corpo em blocos, somando bytes e jogando fora o conteudo. Content-
+    // Length (getSize) pode vir -1 (chunked/desconhecido); nesse caso paramos
+    // quando o servidor fecha ou apos um curto ocio.
+    WiFiClient* stream = http.getStreamPtr();
+    int      contentLen = http.getSize();
+    uint8_t  buf[2048];
+    size_t   bytes = 0;
+
+    uint32_t t0 = millis();          // cronometro so' da transferencia (pos-handshake)
+    uint32_t ultimoDado = t0;
+    for (;;) {
+        size_t disp = stream->available();
+        if (disp) {
+            int lidos = stream->readBytes(buf, disp > sizeof(buf) ? sizeof(buf) : disp);
+            if (lidos <= 0) break;
+            bytes += (size_t)lidos;
+            ultimoDado = millis();
+            if (contentLen > 0 && bytes >= (size_t)contentLen) break;   // baixou tudo
+        } else {
+            if (!http.connected()) break;                 // servidor fechou a conexao
+            if (millis() - ultimoDado > 5000) break;      // guarda contra travar
+            delay(1);
+        }
+    }
+    uint32_t dtMs = millis() - t0;
+    http.end();
+    if (dtMs == 0) dtMs = 1;   // evita divisao por zero em links absurdamente rapidos
+
+    if (bytes == 0) {
+        ui::messageBox("Speed test",
+                       "Nenhum byte recebido.\n\nURL:\n" + url);
+        return;
+    }
+
     // Mbps = (bytes * 8 bits) / (segundos) / 1e6.
     float mbps = (float)bytes * 8.0f / ((float)dtMs / 1000.0f) / 1e6f;
     float kb   = (float)bytes / 1024.0f;

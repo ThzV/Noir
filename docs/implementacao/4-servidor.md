@@ -39,6 +39,7 @@ As URLs/tokens ficam na NVS (Preferences). **Nunca** no código versionado — o
 pt_url  pt_tok            (Portainer)
 ag_url  ag_usr  ag_pwd    (AdGuard)
 uk_url                    (Uptime Kuma: URL COMPLETA da status page)
+srv_verify                (bool: valida cert TLS; padrão true)
 ```
 
 ### `core/wifi_service.h`
@@ -69,6 +70,7 @@ deserializeJson(doc, resp.body, DeserializationOption::Filter(filter));
 - `filter[0][...]` é a forma de filtrar **cada elemento de um array**.
 - Para objetos simples (AdGuard) usamos `filter["num_dns_queries"] = true;`.
 - Para estruturas aninhadas (Uptime Kuma) encadeamos: `filter["publicGroupList"][0]["monitorList"][0]["id"] = true;`.
+- Para objetos com **chaves dinâmicas** (o `heartbeatList` do Uptime Kuma é keado pelo id do monitor) usamos o **curinga** `*`, que casa qualquer chave: `filter["heartbeatList"]["*"][0]["status"] = true;` — assim mantemos só o `status` de cada batimento e descartamos `msg`/`ping`/`time`.
 
 Detalhe importante: `resp.body` **já** é uma `String` inteira na RAM (é o que o `net` devolve). O filtro não reduz o download, mas reduz drasticamente o **documento parseado**, que é onde a memória realmente aperta.
 
@@ -78,6 +80,8 @@ Detalhe importante: `resp.body` **já** é uma `String` inteira na RAM (é o que
 
 ### Config servidor
 Um menu (`listView`) onde cada item abre um `textInput`. Campos de token/senha usam `mask=true`. O resumo mostra só `*` (preenchido) ou `-` (vazio) — **nunca** revela o segredo em tela.
+
+O último item é o **toggle "Verificar cert TLS"** (`[ON]`/`[OFF]`), gravado na chave NVS `srv_verify` (bool, **padrão `true`**). Ele não abre `textInput`: seleciona-lo alterna o valor e mostra uma `messageBox` de confirmação. `ON` = valida o certificado (`insecure=false`); `OFF` = aceita cert self-signed (`insecure=true`). Ver seção 6.
 
 ### Containers (Portainer)
 1. `portainerEndpointId()` faz `GET /api/endpoints` e pega o **Id do primeiro ambiente** (um homelab típico tem um só). É preciso porque todas as rotas de container passam por `/api/endpoints/{id}/docker/...`.
@@ -94,12 +98,18 @@ O resultado vai para o `visualizadorTexto()`, um leitor rolável em `Font0` (mon
 ### AdGuard
 `GET /control/stats` (queries e bloqueios) + `GET /control/status` (proteção ligada?). Calculamos a `%` de bloqueio e mostramos tudo numa `messageBox`. Basic Auth via `basicAuth()`.
 
+Dois detalhes de contagem:
+- **"Bloqueadas" = filtragem + reescritas.** Para casar com o painel do AdGuard, somamos `num_blocked_filtering` com as reescritas `num_replaced_safebrowsing`, `num_replaced_safesearch` e `num_replaced_parental`.
+- **Overflow de `int32`.** `blocked * 100` pode passar de 2³¹ em contadores grandes, corrompendo a `%`. Por isso a conta é feita em **64 bits**: `(int)(((int64_t)blocked * 100) / queries)`.
+
 ### Uptime Kuma
 São **dois** endpoints da mesma status page:
 - a **URL configurada** (`uk_url`) devolve `publicGroupList[].monitorList[]` com `id` e `name`;
 - a URL de **heartbeat** devolve o último batimento de cada monitor.
 
-Derivamos a URL de heartbeat inserindo `/heartbeat/` logo após `/api/status-page/`. O `heartbeatList` é um objeto **keado pelo id do monitor** (chaves dinâmicas), então esse parse não usa filtro — pegamos o `status` do último batimento: `1` = up (bolinha branca), `0` = down (vermelha), outros = cinza. Desenhamos a lista à mão com `fillCircle` + nome.
+Derivamos a URL de heartbeat inserindo `/heartbeat/` logo após `/api/status-page/`. O `heartbeatList` é um objeto **keado pelo id do monitor** (chaves dinâmicas). Como **não há PSRAM**, esse parse **também usa filtro**, com o curinga `*` para as chaves dinâmicas: `filter["heartbeatList"]["*"][0]["status"] = true;`. Assim só materializamos o `status` de cada batimento (o array cru, com `msg`/`ping`/`time` por beat, poderia estourar o heap). Pegamos o `status` do último batimento: `1` = up (bolinha branca), `0` = down (vermelha), outros = cinza. Desenhamos a lista à mão com `fillCircle` + nome.
+
+Se o `GET` de heartbeat falhar **ou** o `deserializeJson` retornar erro, seguimos em **status parcial**: os monitores ficam em cinza e mostramos uma `messageBox` avisando ("Batimentos indisponíveis"). A lista de monitores (nomes) ainda aparece.
 
 ---
 
@@ -126,19 +136,23 @@ Ordem de preferência:
 
 ### Tokens e o parâmetro `insecure`
 - **Tokens/senhas** ficam na NVS (config), nunca no Git. Trate o token do Portainer como uma senha de administrador — ele **é** isso.
-- `noir::net` aceita `insecure=true` (padrão), que **não valida o certificado** TLS. Isso serve para homelab com cert *self-signed* **em rede confiável** (ex.: você já está dentro da VPN). **Pela internet aberta, `insecure=true` é perigoso**: um intermediário pode se passar pelo servidor. Com VPN/Cloudflare/reverse-proxy usando **certificado válido**, você não precisa de `insecure`.
+- `noir::net` aceita `insecure=true` (padrão da **API**), que **não valida o certificado** TLS. Um intermediário poderia se passar pelo servidor (MITM) e capturar token/credenciais.
+- **Este módulo, porém, valida por padrão.** Todas as chamadas passam `insecure = !srv_verify`, e `srv_verify` **começa `true`** → `insecure=false` → o certificado **é** verificado. Isso protege o acesso remoto pela internet aberta sem configuração extra.
+- Se o seu homelab usa **cert self-signed** e você está numa **rede confiável / VPN**, use o toggle **"Verificar cert TLS" → OFF** em Config servidor (grava `srv_verify=false`). Prefira, ainda assim, um **certificado válido** (Let's Encrypt via reverse-proxy) ou uma VPN/Cloudflare, e deixe a validação ligada.
 
-Resumo: **exponha o mínimo, autentique tudo, e prefira um cert válido a desligar a validação.**
+Resumo: **exponha o mínimo, autentique tudo, e prefira um cert válido a desligar a validação.** O padrão seguro (validar) só deve ser afrouxado conscientemente, em rede confiável.
 
 ---
 
 ## 7. Armadilhas e decisões, em resumo
 
-- **Sem PSRAM** → filtro do ArduinoJson em todo parse grande; `tail=50` nos logs; nada de buffers gigantes.
-- **Chave NVS ≤ 15 chars** → nomes curtos (`pt_url`, `ag_pwd`...).
+- **Sem PSRAM** → filtro do ArduinoJson em **todo** parse grande; `tail=50` nos logs; nada de buffers gigantes.
+- **Chave NVS ≤ 15 chars** → nomes curtos (`pt_url`, `ag_pwd`, `srv_verify`...).
 - **Log multiplexado do Docker** → limpeza de bytes de controle (best-effort).
 - **Endpoint do Portainer** → resolvido dinamicamente (primeiro ambiente) para não gastar mais uma chave de config.
-- **Uptime Kuma sem API rica** → usamos a status page pública + heartbeat; `heartbeatList` tem chaves dinâmicas, então esse parse não é filtrável.
+- **Uptime Kuma sem API rica** → usamos a status page pública + heartbeat; `heartbeatList` tem chaves dinâmicas, filtradas com o **curinga `*`**; falha vira **status parcial** (monitores em cinza + aviso).
+- **AdGuard** → "bloqueadas" soma filtragem + reescritas; `%` calculada em **64 bits** (evita overflow de `int32`).
+- **TLS valida por padrão** → `srv_verify=true` → `insecure=false`; toggle em Config servidor afrouxa só em rede confiável.
 - **Segredos fora da tela** → o menu de config mostra só `*`/`-`, e senhas usam `mask=true`.
 - **Ações reais por último** com `danger=true` e `confirm()`.
 

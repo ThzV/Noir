@@ -94,14 +94,17 @@ bool isImageExt(const String& ex) {
 // ---------------------------------------------------------------------------
 
 // Garante que o SD esteja pronto. O SPI so' precisa ser configurado uma vez;
-// SD.begin() e' idempotente e re-monta o cartao (permite trocar o cartao).
-// Retorna false se nao houver cartao -> o app avisa com messageBox.
+// ja' SD.begin() e' cacheado: se o cartao ja' foi montado, uma segunda chamada
+// nao re-monta e uma troca a quente/remocao passa despercebida. Por isso
+// chamamos SD.end() antes, forcando uma re-montagem a cada app (permite trocar
+// o cartao). Retorna false se nao houver cartao -> o app avisa com messageBox.
 bool ensureSD() {
     static bool spiStarted = false;
     if (!spiStarted) {
         SPI.begin(40, 39, 14, 12);   // SCLK, MISO, MOSI, CS
         spiStarted = true;
     }
+    SD.end();                        // descarta o estado cacheado -> re-monta
     if (!SD.begin(12, SPI)) return false;
     return SD.cardType() != CARD_NONE;
 }
@@ -272,12 +275,14 @@ bool loadFile(const String& path, String& buf) {
 }
 
 // Grava 'buf' em 'path' (FILE_WRITE trunca o arquivo). Retorna sucesso.
+// write() devolve o numero de bytes gravados: se o cartao encher, sera' menor
+// que buf.length() -> reportamos falha (a UI mostra o erro).
 bool saveFile(const String& path, const String& buf) {
     File w = SD.open(path, FILE_WRITE);
     if (!w) return false;
-    w.print(buf);
+    size_t n = w.write((const uint8_t*)buf.c_str(), buf.length());
     w.close();
-    return true;
+    return n == buf.length();
 }
 
 // Abre um arquivo de texto: se couber, edita e pergunta se grava; se for maior
@@ -437,6 +442,13 @@ void appEditor() {
         String nm = ui::textInput("Nome (em /noir)", "novo.txt", false, &ok);
         if (!ok || !nm.length()) return;
         String path = joinPath("/noir", nm);
+        if (SD.exists(path)) {
+            // Ja' existe: nunca truncar cegamente. Reaproveita openTextFile(),
+            // que carrega o conteudo, edita (ou mostra somente-leitura se for
+            // grande demais) e so' grava apos ui::confirm.
+            openTextFile(path);
+            return;
+        }
         String buf;
         editText(baseName(path).c_str(), buf);
         if (saveFile(path, buf)) toast("Salvo");
@@ -457,7 +469,16 @@ void appNotes() {
     const char* path = "/noir/notas.txt";
 
     String buf;
-    loadFile(path, buf);                          // carrega o que ja' existe
+    bool whole = loadFile(path, buf);             // carrega o que ja' existe
+    if (!whole) {
+        // Notas maiores que EDIT_LIMIT: so' carregamos a cauda seria apagada no
+        // autosave (PERDA DE DADOS). Mostramos somente-leitura e NAO gravamos.
+        ui::messageBox("Notas",
+                       "notas.txt e' maior que " + humanSize(EDIT_LIMIT) + ".\n"
+                       "Abrindo somente leitura\n(sem autosave).");
+        viewText("Notas rapidas", buf);
+        return;
+    }
     editText("Notas rapidas", buf);               // edita
     // Autosave: gravamos sempre ao sair, sem perguntar.
     if (saveFile(path, buf)) toast("Notas salvas");

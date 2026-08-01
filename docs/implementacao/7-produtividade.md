@@ -101,8 +101,10 @@ FOCO --(N focos)--> PAUSA_LONGA
 FOCO --(senão)----> PAUSA_CURTA --> FOCO ...
 ```
 
-`pomos % every == 0` decide se a pausa é longa. Cada foco concluído incrementa o
-contador.
+`pomos % every == 0` decide se a pausa é longa. **Só um foco concluído
+naturalmente** (o tempo chega a zero) incrementa o contador e cadencia a pausa
+longa — `SPACE` (pular) apenas troca de fase, sem inflar o contador nem
+antecipar o descanso longo.
 
 **Contagem independente do desenho:** usamos um "tick" de 1 segundo baseado em
 `millis()`, separado do fps de renderização:
@@ -124,15 +126,21 @@ A tela de config ajusta os 4 parâmetros com as setas e grava tudo só no `ENTER
 ## App 4 — Calendário
 
 Grade do mês em 7 colunas. O ponto-chave é descobrir **em qual coluna cai o dia
-1**. Fazemos isso com `mktime()`, que normaliza um `struct tm` e preenche
-`tm_wday` (0 = domingo):
+1**. Fazemos isso com o **algoritmo de Sakamoto**, puramente aritmético
+(0 = domingo):
 
 ```cpp
-struct tm t = {};
-t.tm_year = ano - 1900;  t.tm_mon = mes;  t.tm_mday = 1;
-t.tm_hour = 12;          t.tm_isdst = -1;   // meio-dia evita bordas de DST
-mktime(&t);              // agora t.tm_wday é o dia da semana do dia 1
+static const int t[] = {0,3,2,5,0,3,5,1,4,6,2,4};
+int y = ano; int m = mes + 1;
+if (m < 3) y -= 1;                       // jan/fev contam no ano anterior
+int wday = (y + y/4 - y/100 + y/400 + t[m-1] + 1) % 7;   // dia 1 do mês
 ```
+
+Evitamos `mktime()` de propósito: com `time_t` de 32 bits (Arduino/ESP32) datas
+além de 2038 estouram e `mktime()` devolve `-1`, deixando `tm_wday` com lixo e
+deslocando o mês inteiro. Sakamoto vale para qualquer ano do calendário
+gregoriano. Ainda assim, a navegação limita o ano a **1970..2099** por sanidade
+de UI.
 
 Dias no mês vêm de uma tabela, com fevereiro tratado por `bissexto()`.
 

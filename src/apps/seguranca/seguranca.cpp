@@ -30,6 +30,7 @@
 #include <vector>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>          // strtoull() para o contador de nonce persistido
 #include <time.h>
 
 #include "esp_random.h"        // esp_random() -> uint32_t do gerador de HW (TRNG)
@@ -118,7 +119,12 @@ bool base32Decode(const String& in, std::vector<uint8_t>& out) {
 //  do PBKDF2. Reutilizamos um unico contexto HMAC entre as iteracoes para
 //  nao pagar setup/alloc a cada volta (importante num MCU).
 // ----------------------------------------------------------------------------
-constexpr int PBKDF2_ITERS = 20000;   // custo por desbloqueio (~algumas centenas de ms)
+// Custo por desbloqueio. Trade-off no MCU: mais iteracoes = brute force offline
+// mais caro (bom), porem cada unlock demora mais (ruim). 100000 e' um piso
+// razoavel para o ESP32-S3 (~1-2 s de derivacao) sem PSRAM.
+// ATENCAO: mudar este valor INVALIDA cofres ja' existentes, pois a chave
+// derivada muda e a GCM deixa de decifrar -> use "Resetar cofre" para recriar.
+constexpr int PBKDF2_ITERS = 100000;
 
 void pbkdf2_sha256(const uint8_t* pw, size_t pwlen,
                    const uint8_t* salt, size_t saltlen,
@@ -375,8 +381,12 @@ void appQr() {
 //    kind = 'T' -> semente TOTP em Base32 (app TOTP)
 //
 //  NVS (chaves <= 15 chars):
-//    "sec_salt"  -> Base64 do salt (16 bytes) do PBKDF2
+//    "sec_salt"  -> Base64 do salt (16 bytes) do PBKDF2 (gravado so' APOS o
+//                   primeiro vaultSave dar certo, para nunca deixar um cofre
+//                   "meio criado" e inacessivel).
 //    "sec_vault" -> Base64 de (IV[12] || TAG[16] || CIPHERTEXT)
+//    "sec_ctr"   -> contador monotonico (decimal) que gera os 8 primeiros bytes
+//                   do nonce GCM, garantindo nonce unico por construcao.
 //
 //  Seguranca:
 //    - GCM e' cifra AUTENTICADA: a TAG confirma integridade E chave correta.
@@ -398,6 +408,17 @@ struct VaultEntry {
 uint8_t                 g_key[32];       // chave AES-256 derivada (so em RAM)
 bool                    g_unlocked = false;
 std::vector<VaultEntry> g_entries;
+
+// Higiene de memoria: zera o buffer interno de uma Arduino String que guardou
+// dado sensivel (senha-mestra/segredo) e a esvazia. A Arduino String NAO limpa
+// a heap ao ser destruida, entao sobrescrevemos manualmente antes de sair de
+// escopo. Limitacao: copias temporarias feitas pela lib (realloc/substring/+=)
+// podem deixar residuos que nao controlamos; isto REDUZ, mas nao elimina, a
+// janela de exposicao do texto plano na RAM.
+void wipe(String& s) {
+    if (s.length() > 0) memset((void*)s.c_str(), 0, s.length());
+    s = "";
+}
 
 // Remove separadores que quebrariam a serializacao (\t e \n viram espaco).
 String sanitize(const String& s) {
@@ -440,8 +461,24 @@ void parse(const String& s) {
 
 // Cifra 'plain' com g_key. Saida = IV || TAG || CIPHERTEXT.
 bool gcmEncrypt(const String& plain, std::vector<uint8_t>& blob) {
+    // Nonce GCM de 96 bits UNICO POR CONSTRUCAO. Reusar o par (chave, nonce) no
+    // GCM e' catastrofico: vaza o keystream e permite forjar a TAG. Como este app
+    // e' OFFLINE, o TRNG (esp_random) pode nao ter entropia de RF garantida e um
+    // IV puramente aleatorio poderia REPETIR com a chave fixa de sessao. Por isso
+    // os 8 primeiros bytes vem de um contador MONOTONICO persistido na NVS
+    // ("sec_ctr"), incrementado e gravado a cada cifragem: mesmo com RNG fraco o
+    // nonce nunca se repete. Os 4 bytes finais sao aleatorios apenas como margem.
+    uint64_t ctr = (uint64_t)strtoull(
+        noir::config::getStr("sec_ctr", "0").c_str(), nullptr, 10) + 1;
+    char ctrStr[24];
+    snprintf(ctrStr, sizeof(ctrStr), "%llu", (unsigned long long)ctr);
+    noir::config::setStr("sec_ctr", String(ctrStr));   // persiste ANTES de usar
+
     uint8_t iv[12];
-    fillRandom(iv, 12);
+    for (int i = 7; i >= 0; i--) { iv[i] = (uint8_t)(ctr & 0xff); ctr >>= 8; }
+    uint32_t rnd = esp_random();
+    memcpy(iv + 8, &rnd, 4);
+
     size_t n = plain.length();
     std::vector<uint8_t> ct(n);
     uint8_t tag[16];
@@ -513,8 +550,20 @@ bool vaultLoad() {
 // Zera a chave da RAM e trava o cofre.
 void vaultLock() {
     memset(g_key, 0, sizeof(g_key));
+    for (auto& e : g_entries) wipe(e.secret);   // zera os segredos antes de liberar
     g_entries.clear();
     g_unlocked = false;
+}
+
+// Recuperacao de emergencia: apaga TODO o cofre (salt + blob + contador de
+// nonce). Usada quando a senha-mestra foi perdida, o blob corrompeu ou um cofre
+// antigo ficou incompativel (ex.: mudanca de iteracoes do PBKDF2). NAO recupera
+// dados; apenas permite recriar um cofre limpo.
+void vaultReset() {
+    noir::config::remove("sec_salt");
+    noir::config::remove("sec_vault");
+    noir::config::remove("sec_ctr");
+    vaultLock();
 }
 
 // Garante o cofre destravado. Na primeira vez, cria a senha-mestra.
@@ -532,25 +581,51 @@ bool vaultEnsureUnlocked() {
         bool ok = true;
         String p1 = ui::textInput("Nova senha-mestra", "", true, &ok);
         if (!ok) return false;
-        if (p1.length() < 4) { ui::redStripe("Senha muito curta (min 4)"); return false; }
+        if (p1.length() < 8) { wipe(p1); ui::redStripe("Senha muito curta (min 8)"); return false; }
         String p2 = ui::textInput("Repita a senha", "", true, &ok);
-        if (!ok) return false;
-        if (p1 != p2) { ui::redStripe("Senhas diferentes"); return false; }
+        if (!ok) { wipe(p1); return false; }
+        if (p1 != p2) { wipe(p1); wipe(p2); ui::redStripe("Senhas diferentes"); return false; }
 
         uint8_t salt[16];
         fillRandom(salt, 16);
         ui::progress("Cofre", "Derivando chave...", 50);
         pbkdf2_sha256((const uint8_t*)p1.c_str(), p1.length(), salt, 16,
                       PBKDF2_ITERS, g_key);
+        wipe(p1); wipe(p2);   // a senha-mestra ja' virou chave: some com o texto
 
-        noir::config::setStr("sec_salt", b64encode(salt, 16));
         g_entries.clear();
         g_unlocked = true;
-        if (!vaultSave()) { vaultLock(); ui::redStripe("Falha ao criar cofre"); return false; }
+        // O salt so' e' persistido APOS o vaultSave dar certo. Se gravassemos o
+        // salt antes e o save falhasse, o cofre existiria (sec_salt presente) mas
+        // sem blob decifravel -> inacessivel para sempre. Na falha, removemos
+        // qualquer residuo para o proximo uso recomecar limpo.
+        if (!vaultSave()) {
+            noir::config::remove("sec_vault");
+            noir::config::remove("sec_ctr");
+            vaultLock();
+            ui::redStripe("Falha ao criar cofre");
+            return false;
+        }
+        noir::config::setStr("sec_salt", b64encode(salt, 16));
         return true;
     }
 
-    // -------- Cofre existe: desbloquear --------
+    // -------- Cofre existe: desbloquear (ou resetar se a senha foi perdida) --------
+    // A opcao de reset vem ANTES de pedir a senha: e' a unica recuperacao possivel
+    // para quem esqueceu a senha-mestra (num cofre GCM nao existe "esqueci minha
+    // senha"). Tambem resgata cofres corrompidos ou incompativeis (ex.: iteracoes
+    // do PBKDF2 alteradas).
+    int esc = ui::listView("Cofre", {"Desbloquear", "Resetar cofre"}, 0, 1 /* reset = perigo */);
+    if (esc < 0) return false;
+    if (esc == 1) {
+        if (ui::confirm("Resetar cofre",
+                        "Isto APAGA todo o\ncofre (sem volta).\nContinuar?", true)) {
+            vaultReset();
+            ui::messageBox("Cofre", "Cofre apagado.\nAbra de novo para\ncriar um novo.");
+        }
+        return false;
+    }
+
     std::vector<uint8_t> salt;
     if (!b64decode(saltB64, salt) || salt.size() != 16) {
         ui::redStripe("Cofre corrompido");
@@ -563,6 +638,7 @@ bool vaultEnsureUnlocked() {
     ui::progress("Cofre", "Derivando chave...", 50);
     pbkdf2_sha256((const uint8_t*)pw.c_str(), pw.length(), salt.data(), 16,
                   PBKDF2_ITERS, g_key);
+    wipe(pw);   // o texto da senha some assim que vira chave
 
     // A prova da senha correta e' a propria GCM: se decifrar, a chave bate.
     if (!vaultLoad()) {
@@ -670,8 +746,10 @@ void appTotp() {
             String seg = ui::textInput("Segredo Base32", "", true, &ok);
             if (!ok || seg.length() == 0) continue;
             std::vector<uint8_t> chk;
-            if (!base32Decode(seg, chk)) { ui::redStripe("Base32 invalido"); continue; }
+            if (!base32Decode(seg, chk)) { wipe(seg); ui::redStripe("Base32 invalido"); continue; }
+            if (!chk.empty()) memset(chk.data(), 0, chk.size());   // segredo decodificado fora da pilha
             g_entries.push_back({'T', sanitize(nome), sanitize(seg)});
+            wipe(seg);   // zera o texto do segredo (a copia sanitizada ja' esta' no cofre)
             if (!vaultSave()) ui::redStripe("Falha ao salvar");
             continue;
         }
@@ -685,6 +763,7 @@ void appTotp() {
             std::vector<uint8_t> key;
             if (!base32Decode(g_entries[idx].secret, key)) { ui::redStripe("Segredo invalido"); continue; }
             telaTotp(g_entries[idx].title, key);
+            if (!key.empty()) memset(key.data(), 0, key.size());   // higiene: apaga a chave HMAC
         } else if (act == 1) {
             if (ui::confirm("Apagar", "Remover esta conta\ndo cofre?", true)) {
                 g_entries.erase(g_entries.begin() + idx);
@@ -721,6 +800,7 @@ void appCofre() {
             String segredo = ui::textInput("Segredo/senha", "", true, &ok);
             if (!ok) continue;
             g_entries.push_back({'P', sanitize(titulo), sanitize(segredo)});
+            wipe(segredo);   // zera o texto digitado (copia sanitizada ja' esta' no cofre)
             if (!vaultSave()) ui::redStripe("Falha ao salvar");
             continue;
         }

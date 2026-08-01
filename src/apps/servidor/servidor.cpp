@@ -9,9 +9,11 @@
 //
 //  ACESSO REMOTO SEGURO (leia docs/implementacao/4-servidor.md): NAO exponha
 //  Portainer/AdGuard direto na internet. Use uma VPN (Tailscale/WireGuard),
-//  um Cloudflare Tunnel ou um reverse-proxy (Caddy/Nginx) com HTTPS + auth. O
-//  parametro insecure=true do net (nao valida certificado) so' e' aceitavel
-//  em rede confiavel / cert self-signed; pela internet, prefira cert valido.
+//  um Cloudflare Tunnel ou um reverse-proxy (Caddy/Nginx) com HTTPS + auth. Por
+//  padrao este modulo VALIDA o certificado TLS (config "srv_verify"=true =>
+//  insecure=false), protegendo token/credenciais contra MITM. O toggle
+//  "Verificar cert TLS" em Config servidor permite aceitar cert self-signed
+//  (insecure=true) SO' em rede confiavel / VPN; pela internet, prefira cert valido.
 //
 //  Memoria: o Cardputer NAO tem PSRAM. As respostas de Docker/Portainer podem
 //  ser enormes, entao usamos SEMPRE um filtro do ArduinoJson (Filter) para so'
@@ -45,6 +47,7 @@ constexpr const char* K_AG_USR = "ag_usr";   // AdGuard:   usuario (Basic Auth)
 constexpr const char* K_AG_PWD = "ag_pwd";   // AdGuard:   senha   (Basic Auth)
 constexpr const char* K_UK_URL = "uk_url";   // Uptime Kuma: URL COMPLETA da status page
                                              //   ex. http://host:3001/api/status-page/casa
+constexpr const char* K_SRV_VERIFY = "srv_verify"; // valida cert TLS (true=seguro, padrao)
 
 // ----------------------------------------------------------------------------
 //  Helpers gerais
@@ -55,6 +58,14 @@ bool exigirWifi() {
     if (noir::wifi::ensure()) return true;
     ui::messageBox("Servidor", "Sem WiFi.\nConecte em Config > WiFi\ne tente de novo.");
     return false;
+}
+
+// TLS: por padrao VALIDAMOS o certificado (insecure=false), evitando MITM que
+// roubaria token/credenciais no acesso remoto. O toggle "Verificar cert TLS"
+// em Config servidor permite aceitar cert self-signed (insecure=true) quando
+// se esta' numa rede confiavel/VPN. Ver docs/implementacao/4-servidor.md.
+bool servidorInsecure() {
+    return !noir::config::getBool(K_SRV_VERIFY, true);
 }
 
 // Remove uma barra final da URL (evita "http://x//api").
@@ -136,7 +147,7 @@ void visualizadorTexto(const char* titulo, const std::vector<String>& linhas) {
 //  Retorna o Id ou -1 (com mensagem de erro ja' exibida se pediu).
 int portainerEndpointId(const String& base, const String& tok, bool mostrarErro) {
     std::vector<noir::net::Header> h = {{"X-API-Key", tok}};
-    noir::net::Resp r = noir::net::get(base + "/api/endpoints", h);
+    noir::net::Resp r = noir::net::get(base + "/api/endpoints", h, servidorInsecure());
     if (!r.ok()) { if (mostrarErro) checarResp(r, "Listar endpoints"); return -1; }
 
     // Filtro: so' precisamos do Id de cada elemento do array.
@@ -170,7 +181,7 @@ bool portainerContainers(const String& base, const String& tok, int endpoint,
     std::vector<noir::net::Header> h = {{"X-API-Key", tok}};
     String url = base + "/api/endpoints/" + String(endpoint) +
                  "/docker/containers/json?all=1";
-    noir::net::Resp r = noir::net::get(url, h);
+    noir::net::Resp r = noir::net::get(url, h, servidorInsecure());
     if (!checarResp(r, "Listar containers")) return false;
 
     // Filtro por elemento do array: manter apenas 4 campos (economiza MUITA RAM,
@@ -269,7 +280,7 @@ void appLogs() {
     String url = base + "/api/endpoints/" + String(endpoint) +
                  "/docker/containers/" + c.id +
                  "/logs?stdout=1&stderr=1&tail=50";
-    noir::net::Resp r = noir::net::get(url, h);
+    noir::net::Resp r = noir::net::get(url, h, servidorInsecure());
     if (!checarResp(r, "Baixar logs")) return;
 
     // A Docker Engine multiplexa stdout/stderr com um cabecalho binario de 8
@@ -314,7 +325,7 @@ void appReiniciar() {
     std::vector<noir::net::Header> h = {{"X-API-Key", tok}};
     String url = base + "/api/endpoints/" + String(endpoint) +
                  "/docker/containers/" + c.id + "/restart";
-    noir::net::Resp r = noir::net::post(url, "", "application/json", h);
+    noir::net::Resp r = noir::net::post(url, "", "application/json", h, servidorInsecure());
 
     // O Docker responde 204 (No Content) no restart bem-sucedido.
     if (r.code == 204 || r.ok())
@@ -348,25 +359,34 @@ void appAdGuard() {
     ui::progress("AdGuard", "Buscando stats...", 50);
 
     // /control/stats: totais do dia. Filtramos so' os dois numeros que usamos.
-    noir::net::Resp rs = noir::net::get(base + "/control/stats", {auth});
+    noir::net::Resp rs = noir::net::get(base + "/control/stats", {auth}, servidorInsecure());
     if (!checarResp(rs, "Stats AdGuard")) return;
 
     JsonDocument fStats;
-    fStats["num_dns_queries"]       = true;
-    fStats["num_blocked_filtering"] = true;
+    fStats["num_dns_queries"]           = true;
+    fStats["num_blocked_filtering"]     = true;
+    fStats["num_replaced_safebrowsing"] = true;
+    fStats["num_replaced_safesearch"]   = true;
+    fStats["num_replaced_parental"]     = true;
     JsonDocument stats;
     if (deserializeJson(stats, rs.body, DeserializationOption::Filter(fStats))) {
         ui::messageBox("AdGuard", "JSON de stats\ninvalido.");
         return;
     }
-    long queries  = stats["num_dns_queries"]       | 0L;
-    long blocked  = stats["num_blocked_filtering"] | 0L;
-    int  pct      = queries > 0 ? (int)((blocked * 100) / queries) : 0;
+    long queries  = stats["num_dns_queries"] | 0L;
+    // "Bloqueadas" no dashboard = filtragem + reescritas (safebrowsing/parental/
+    // safesearch); somamos tudo para casar com o painel do AdGuard.
+    long blocked  = (stats["num_blocked_filtering"]     | 0L)
+                  + (stats["num_replaced_safebrowsing"] | 0L)
+                  + (stats["num_replaced_safesearch"]   | 0L)
+                  + (stats["num_replaced_parental"]     | 0L);
+    // blocked*100 pode passar de 2^31 em contadores grandes => calcular em 64 bits.
+    int  pct      = queries > 0 ? (int)(((int64_t)blocked * 100) / queries) : 0;
 
     // /control/status: saber se a protecao esta' ligada.
     JsonDocument fStatus;
     fStatus["protection_enabled"] = true;
-    noir::net::Resp rp = noir::net::get(base + "/control/status", {auth});
+    noir::net::Resp rp = noir::net::get(base + "/control/status", {auth}, servidorInsecure());
     bool protecao = false;
     if (rp.ok()) {
         JsonDocument st;
@@ -391,7 +411,7 @@ void appToggleProtecao() {
     ui::progress("Protecao", "Lendo estado...", 40);
     JsonDocument fStatus;
     fStatus["protection_enabled"] = true;
-    noir::net::Resp rp = noir::net::get(base + "/control/status", {auth});
+    noir::net::Resp rp = noir::net::get(base + "/control/status", {auth}, servidorInsecure());
     if (!checarResp(rp, "Status AdGuard")) return;
     JsonDocument st;
     if (deserializeJson(st, rp.body, DeserializationOption::Filter(fStatus))) {
@@ -408,7 +428,7 @@ void appToggleProtecao() {
     ui::progress("Protecao", alvo ? "Ligando..." : "Desligando...", 70);
     String body = String("{\"enabled\":") + (alvo ? "true" : "false") + "}";
     noir::net::Resp r = noir::net::post(base + "/control/protection", body,
-                                        "application/json", {auth});
+                                        "application/json", {auth}, servidorInsecure());
     if (r.ok() || r.code == 200)
         ui::messageBox("Protecao", String("Protecao agora: ") +
                        (alvo ? "LIGADA" : "desligada"));
@@ -441,7 +461,7 @@ void appUptimeKuma() {
     JsonDocument fPage;
     fPage["publicGroupList"][0]["monitorList"][0]["id"]   = true;
     fPage["publicGroupList"][0]["monitorList"][0]["name"] = true;
-    noir::net::Resp rp = noir::net::get(url, {});
+    noir::net::Resp rp = noir::net::get(url, {}, servidorInsecure());
     if (!checarResp(rp, "Status page")) return;
     JsonDocument page;
     if (deserializeJson(page, rp.body, DeserializationOption::Filter(fPage))) {
@@ -469,10 +489,19 @@ void appUptimeKuma() {
         hbUrl = hbUrl.substring(0, pos) + "/api/status-page/heartbeat/" +
                 hbUrl.substring(pos + SP_LEN);
     ui::progress("Uptime Kuma", "Lendo status...", 75);
-    noir::net::Resp rh = noir::net::get(hbUrl, {});
+    noir::net::Resp rh = noir::net::get(hbUrl, {}, servidorInsecure());
+    bool statusParcial = !rh.ok();   // sem batimentos => monitores ficam em cinza
     if (rh.ok()) {
-        JsonDocument hb;   // sem filtro: precisamos das chaves dinamicas (ids)
-        if (!deserializeJson(hb, rh.body)) {
+        // Filtro OBRIGATORIO (sem PSRAM): heartbeatList e' um objeto keyado pelo
+        // id do monitor (chaves DINAMICAS => curinga "*"); de cada batimento so'
+        // guardamos "status". Sem isso, o array cru (msg/ping/time por beat)
+        // poderia estourar o heap.
+        JsonDocument filter;
+        filter["heartbeatList"]["*"][0]["status"] = true;
+        JsonDocument hb;
+        if (deserializeJson(hb, rh.body, DeserializationOption::Filter(filter))) {
+            statusParcial = true;   // falha ao parsear => segue sem status
+        } else {
             JsonObject list = hb["heartbeatList"];
             for (Mon& mm : mons) {
                 JsonArray beats = list[String(mm.id)];
@@ -481,6 +510,9 @@ void appUptimeKuma() {
             }
         }
     }
+    if (statusParcial)
+        ui::messageBox("Uptime Kuma",
+            "Batimentos indisponiveis.\nStatus parcial: monitores\nsem cor definida (cinza).");
 
     // 3) Desenha a lista com bolinha: branca(up) / vermelha(down) / cinza(?).
     int top = 0;
@@ -530,6 +562,9 @@ void appConfig() {
             String("AdGuard usuario") + marca(K_AG_USR),
             String("AdGuard senha") + marca(K_AG_PWD),
             String("Uptime Kuma URL") + marca(K_UK_URL),
+            // Toggle TLS: ON = valida cert (seguro); OFF = aceita self-signed.
+            String("Verificar cert TLS") +
+                (noir::config::getBool(K_SRV_VERIFY, true) ? " [ON]" : " [OFF]"),
         };
         int sel = ui::listView("Config servidor", itens);
         if (sel < 0) return;
@@ -561,6 +596,15 @@ void appConfig() {
                 val = ui::textInput("Uptime Kuma URL", noir::config::getStr(K_UK_URL), false, &ok);
                 if (ok) noir::config::setStr(K_UK_URL, val);
                 break;
+            case 6: {
+                // Alterna a validacao do certificado TLS. Feedback NAO-vermelho.
+                bool novo = !noir::config::getBool(K_SRV_VERIFY, true);
+                noir::config::setBool(K_SRV_VERIFY, novo);
+                ui::messageBox("Verificar cert TLS", novo
+                    ? "Validacao LIGADA.\nCert TLS sera' verificado\n(recomendado)."
+                    : "Validacao DESLIGADA.\nAceita cert self-signed.\nUse so' em rede/VPN\nconfiavel.");
+                break;
+            }
         }
     }
 }

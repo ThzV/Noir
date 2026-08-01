@@ -16,7 +16,8 @@
 //  de bateria fraca, que segue o padrao da statusbar).
 //
 //  Sem PSRAM: nada de buffers grandes. O JSON do clima e' pequeno e parseado
-//  com ArduinoJson (documento na stack) e imediatamente descartado.
+//  com ArduinoJson v7 (o JsonDocument aloca no heap dinamicamente, mas e'
+//  pequeno) e imediatamente descartado.
 //
 //  SPDX-License-Identifier: AGPL-3.0-or-later
 // ============================================================================
@@ -34,6 +35,7 @@
 #include <ArduinoJson.h>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 
 namespace apps {
 namespace home {
@@ -50,6 +52,11 @@ namespace {
 // Intervalo entre atualizacoes automaticas do clima: 10 minutos.
 constexpr uint32_t WEATHER_INTERVAL_MS = 10UL * 60UL * 1000UL;
 
+// Backoff no estado de erro/sem-WiFi: reintenta so a cada 60 s. Sem isso, um
+// fetch que falha deixaria a requisicao "sempre vencida" e o GET bloqueante
+// rodaria a cada frame (~1 s), congelando o relogio e o ENTER.
+constexpr uint32_t WEATHER_ERROR_INTERVAL_MS = 60UL * 1000UL;
+
 // Status possiveis da linha de clima (define o texto e a cor).
 enum class WeatherStatus {
     Unconfigured,   // sem "owm_key" salva -> pede para configurar
@@ -64,7 +71,7 @@ struct WeatherState {
     float         tempC   = NAN;    // temperatura na unidade escolhida
     char          unit    = 'C';    // 'C' (metric) ou 'F' (imperial)
     String        desc;             // descricao (ex.: "nuvens dispersas")
-    uint32_t      lastFetch = 0;    // millis() da ultima requisicao bem-sucedida
+    uint32_t      lastFetch = 0;    // millis() da ultima TENTATIVA de requisicao
     bool          everFetched = false;
 };
 
@@ -127,13 +134,16 @@ bool fetchWeather() {
                  "&lang=pt_br&appid=" + urlEncode(key);
 
     // 4) GET (timeout curto: e' a tela inicial, nao queremos congelar muito).
-    noir::net::Resp resp = noir::net::get(url, {}, true, 6000);
+    //    insecure=false: api.openweathermap.org tem cert de CA publica valido,
+    //    entao VALIDAMOS o TLS (host publico na internet).
+    noir::net::Resp resp = noir::net::get(url, {}, false, 6000);
     if (!resp.ok()) {
         g_weather.status = WeatherStatus::Error;
         return false;
     }
 
-    // 5) Parseia so os campos que interessam. Documento pequeno na stack.
+    // 5) Parseia so os campos que interessam. No ArduinoJson v7 o JsonDocument
+    //    aloca no heap (dinamicamente), mas e' pequeno e liberado ao sair.
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, resp.body);
     if (err) {
@@ -151,9 +161,9 @@ bool fetchWeather() {
     const char* d   = doc["weather"][0]["description"] | "";
     g_weather.desc  = d;
 
-    g_weather.status      = WeatherStatus::Ok;
-    g_weather.lastFetch   = millis();
-    g_weather.everFetched = true;
+    // Nota: lastFetch/everFetched sao registrados por maybeFetchWeather no
+    // instante da TENTATIVA (nao so no sucesso), para o backoff funcionar.
+    g_weather.status = WeatherStatus::Ok;
     return true;
 }
 
@@ -161,21 +171,38 @@ bool fetchWeather() {
 //  maybeFetchWeather: decide se e' hora de atualizar o clima.
 //
 //  force=true ignora o intervalo (usado quando o usuario aperta '/').
+//  onBeforeFetch (opcional) e' chamado com o status ja' em Updating, ANTES do
+//  GET bloqueante, para que o chamador desenhe "atualizando..." na tela.
 //  Retorna true se uma requisicao foi disparada (para o chamador redesenhar).
 // ---------------------------------------------------------------------------
-bool maybeFetchWeather(bool force) {
+bool maybeFetchWeather(bool force,
+                       const std::function<void()>& onBeforeFetch = {}) {
     // Sem chave: nao ha o que buscar; so garante o status correto.
     if (noir::config::getStr("owm_key", "").length() == 0) {
         g_weather.status = WeatherStatus::Unconfigured;
         return false;
     }
 
+    // Backoff: so o estado Ok usa o intervalo longo (10 min). Em erro/sem-WiFi
+    // reintentamos a cada 60 s. Isso evita a "tempestade de retries": sem esse
+    // limite, um fetch que falha ficaria sempre "vencido" e o GET bloqueante
+    // rodaria a cada frame (~1 s), congelando relogio e ENTER.
+    uint32_t interval = (g_weather.status == WeatherStatus::Ok)
+                            ? WEATHER_INTERVAL_MS
+                            : WEATHER_ERROR_INTERVAL_MS;
     bool due = force || !g_weather.everFetched ||
-               (millis() - g_weather.lastFetch >= WEATHER_INTERVAL_MS);
+               (millis() - g_weather.lastFetch >= interval);
     if (!due) return false;
 
-    // Feedback visual: a requisicao bloqueia por ate' 6 s.
+    // Registra o instante da TENTATIVA (nao so do sucesso): mesmo que o fetch
+    // falhe, o backoff acima segura a proxima ate' o intervalo vencer.
+    g_weather.lastFetch   = millis();
+    g_weather.everFetched = true;
+
+    // Feedback visual: a requisicao bloqueia por ate' 6 s. Mostra "atualizando"
+    // ANTES de bloquear (senao esse status nunca chega a ser desenhado).
     g_weather.status = WeatherStatus::Updating;
+    if (onBeforeFetch) onBeforeFetch();
     fetchWeather();
     return true;
 }
@@ -194,9 +221,17 @@ String weatherLine() {
             std::snprintf(buf, sizeof(buf), "%d%c  %s",
                           (int)lroundf(g_weather.tempC), g_weather.unit,
                           g_weather.desc.c_str());
-            // Trunca para nao estourar a largura da tela (Font2).
+            // Trunca para nao estourar a largura da tela (Font2), mas numa
+            // fronteira de caractere UTF-8: substring(0,30) cru poderia cortar
+            // no meio de um acento (ex.: "nublado com garoa") e virar lixo.
             String s = buf;
-            if (s.length() > 30) s = s.substring(0, 30);
+            if (s.length() > 30) {
+                size_t cut = 30;
+                // Recua enquanto o byte no corte for continuacao UTF-8 (10xxxxxx),
+                // ou seja, enquanto estivermos no meio de um caractere multibyte.
+                while (cut > 0 && ((uint8_t)s[cut] & 0xC0) == 0x80) --cut;
+                s = s.substring(0, cut);
+            }
             return s;
         }
     }
@@ -210,9 +245,6 @@ String weatherLine() {
 // ============================================================================
 void runDashboard() {
     M5Canvas& d = ui::gfx();
-
-    // Puxa o clima uma vez ja' na entrada (mostra "atualizando..." antes).
-    maybeFetchWeather(false);
 
     // Fecha a lambda por referencia para redesenhar sob demanda.
     auto draw = [&]() {
@@ -268,6 +300,10 @@ void runDashboard() {
         ui::present();
     };
 
+    // Puxa o clima uma vez ja' na entrada. Passamos 'draw' para que a tela
+    // mostre "atualizando..." ANTES do fetch bloqueante.
+    maybeFetchWeather(false, draw);
+
     draw();
     uint32_t lastClock = millis();
 
@@ -280,7 +316,7 @@ void runDashboard() {
 
         // '/' (mapeada como seta Direita): forca atualizar o clima agora.
         if (e.key == ui::Key::Right) {
-            maybeFetchWeather(true);
+            maybeFetchWeather(true, draw);
             draw();
             lastClock = millis();
             continue;
@@ -289,7 +325,7 @@ void runDashboard() {
         // Atualiza o relogio ~1x/seg. De quebra, verifica se o clima venceu
         // o intervalo de 10 min (maybeFetchWeather so age quando "due").
         if (millis() - lastClock >= 1000) {
-            maybeFetchWeather(false);
+            maybeFetchWeather(false, draw);
             draw();
             lastClock = millis();
         }

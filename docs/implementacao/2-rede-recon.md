@@ -139,24 +139,54 @@ Decisões:
 
 ### 2.6 Speed test
 
-Baixa um recurso conhecido com `noir::net::get()` medindo bytes/tempo:
+Baixa um recurso conhecido e estima os Mbps. **Não** usamos `noir::net::get()`
+aqui: ele carrega o corpo **inteiro** numa `String` (via
+`HTTPClient::getString()`) e, como a URL é editável, apontar para um arquivo
+grande estouraria o heap (~320 KB, sem PSRAM) ou truncaria em silêncio. Em vez
+disso, lemos o stream em **blocos de ~2 KB** e apenas **somamos os bytes**,
+descartando o conteúdo — o uso de RAM fica constante para qualquer tamanho:
 
 ```cpp
-uint32_t t0 = millis();
-auto r = noir::net::get(url, {}, true, 15000);
+HTTPClient http;
+http.begin(*client, url);      // client = WiFiClientSecure (valida cert) p/ https
+http.GET();
+WiFiClient* stream = http.getStreamPtr();
+int contentLen = http.getSize();       // -1 se chunked/desconhecido
+uint8_t buf[2048];
+size_t bytes = 0;
+uint32_t t0 = millis();                // cronômetro SÓ da transferência (pós-handshake)
+for (;;) {
+    size_t disp = stream->available();
+    if (disp) {
+        int lidos = stream->readBytes(buf, disp > sizeof(buf) ? sizeof(buf) : disp);
+        if (lidos <= 0) break;
+        bytes += lidos;
+        if (contentLen > 0 && bytes >= (size_t)contentLen) break;
+    } else if (!http.connected()) break;
+}
 uint32_t dt = millis() - t0;
-float mbps = (float)r.body.length() * 8.0f / (dt / 1000.0f) / 1e6f;
+float mbps = (float)bytes * 8.0f / (dt / 1000.0f) / 1e6f;
 ```
+
+Duas decisões de **metodologia**:
+
+- **`t0` começa depois de abrir o stream** (ou seja, após DNS + TCP + handshake
+  TLS). Se cronometrássemos a partir do `GET`, o overhead de conexão inflaria o
+  tempo e **subestimaria** os Mbps. Aqui medimos só a fase de transferência.
+- **TLS validado.** O host padrão é público (`speed.cloudflare.com`), então
+  usamos `WiFiClientSecure` **sem** `setInsecure()` — mesmo caminho seguro do
+  núcleo `net::get(insecure=false)`. Não aceitamos cert inválido por padrão.
 
 A URL fica em **config** (chave `spd_url`, ≤15 chars) e é editável pelo usuário
 (persistimos com `config::setStr` quando muda). O padrão aponta para
 `https://speed.cloudflare.com/__down?bytes=100000`, um endpoint que devolve
 exatamente o número de bytes pedido.
 
-> **Sem PSRAM — cuidado!** `net::get()` carrega o corpo **inteiro** numa `String`
-> na RAM (via `HTTPClient::getString()`). Por isso o padrão baixa só ~100 KB.
-> **Não** aponte `spd_url` para arquivos grandes (dezenas de MB) — o ESP32-S3
-> tem ~300 KB de heap útil e ficaria sem memória.
+> **Sem PSRAM — por que streaming?** Como a URL é editável, um usuário poderia
+> apontar `spd_url` para um arquivo de dezenas de MB. Bufferizar isso na RAM
+> (o que `net::get()` faria) mataria o processo por falta de heap. Lendo em
+> blocos e descartando o conteúdo, o consumo é ~2 KB **independente** do tamanho
+> baixado.
 
 ---
 
@@ -166,7 +196,7 @@ exatamente o número de bytes pedido.
 |-----|----------|
 | `noir::wifi::scan()` / `ensure()` / `isConnected()` | scan e garantir conexão |
 | `noir::config::getStr/setStr` | persistir `spd_url` |
-| `noir::net::get()` | download do speed test |
+| `HTTPClient` + `WiFiClientSecure` (Arduino) | download do speed test por streaming |
 | `ui::listView / messageBox / confirm / textInput / progress / banner / redStripe` | toda a UI |
 | `WiFi.hostByName`, `WiFiClient::connect` (Arduino) | DNS e port scan |
 | `NimBLEDevice / NimBLEScan` (NimBLE-Arduino) | scan BLE |
@@ -188,5 +218,7 @@ Sem `build_flags` extras: o `-I src` já existente resolve os includes do módul
 - **BLE**: copie os dados antes de `deinit`; use scan ativo; API alvo 2.x.
 - **Ping**: a lib não dá perda direta — conte 1 pacote por vez.
 - **Port scan**: timeout curto + confirmação obrigatória.
-- **Speed test**: corpo inteiro na RAM → mantenha a amostra pequena.
+- **Speed test**: leia o corpo por streaming (blocos de ~2 KB, some os bytes) em
+  vez de `net::get()` — a RAM fica constante; cronometre só a transferência
+  (t0 pós-handshake); valide o cert TLS (sem `setInsecure`) para o host público.
 - **NVS**: a chave `spd_url` tem 6 chars (limite é 15). OK.
