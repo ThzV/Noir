@@ -81,7 +81,20 @@ bool checarResp(const noir::net::Resp& r, const char* oque) {
     if (r.code == -2)      msg = "Sem WiFi.";
     else if (r.code == -3) msg = "Falha ao iniciar\nconexao (TLS).";
     else if (r.code < 0)   msg = "Erro de rede (" + String(r.code) + ").";
-    else                   msg = "HTTP " + String(r.code) + ".";
+    else {
+        msg = "HTTP " + String(r.code) + ".";
+        // Um trecho do corpo revela QUEM negou: a app (ex.: Portainer devolve
+        // {"message":"Unauthorized"}) ou um proxy/portal de auth na frente
+        // (ex.: "nginx", "Authelia", HTML de login). Limpa controle e limita.
+        String snip;
+        for (size_t i = 0; i < r.body.length() && snip.length() < 130; ++i) {
+            char ch = r.body[i];
+            if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+            if ((uint8_t)ch >= 0x20) snip += ch;
+        }
+        snip.trim();
+        if (snip.length()) msg += "\n" + snip;
+    }
     ui::messageBox("Servidor", String(oque) + " falhou.\n" + msg);
     return false;
 }
@@ -577,7 +590,10 @@ void appConfig() {
                 if (ok) noir::config::setStr(K_PT_URL, val);
                 break;
             case 1:
-                val = ui::textInput("Portainer token", "", true, &ok);
+                // Token longo digitado a mao: mostramos o valor ATUAL (sem
+                // mascara) para conferir/corrigir. Deve ser a "access token" do
+                // Portainer (comeca com "ptr_"), nao um JWT de sessao.
+                val = ui::textInput("Portainer token", noir::config::getStr(K_PT_TOK), false, &ok);
                 if (ok) noir::config::setStr(K_PT_TOK, val);
                 break;
             case 2:
@@ -589,7 +605,8 @@ void appConfig() {
                 if (ok) noir::config::setStr(K_AG_USR, val);
                 break;
             case 4:
-                val = ui::textInput("AdGuard senha", "", true, &ok);
+                // Mostra a senha atual para conferir/corrigir (dispositivo pessoal).
+                val = ui::textInput("AdGuard senha", noir::config::getStr(K_AG_PWD), false, &ok);
                 if (ok) noir::config::setStr(K_AG_PWD, val);
                 break;
             case 5:
