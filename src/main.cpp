@@ -42,7 +42,20 @@ static void splash() {
     delay(1600);
 }
 
+// Tarefa de diagnostico: imprime um "heartbeat" no serial (USB-CDC) a cada 3s
+// com o uptime e o heap livre. Serve para validar que o firmware esta vivo e
+// estavel (sem reset-loop nem vazamento de memoria) enquanto roda o launcher.
+static void heartbeatTask(void*) {
+    for (;;) {
+        Serial.printf("[hb] uptime=%lus  heap_livre=%u bytes\n",
+                      (unsigned long)(millis() / 1000), (unsigned)ESP.getFreeHeap());
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    }
+}
+
 void setup() {
+    Serial.begin(115200);
+
     auto cfg = M5.config();
     M5Cardputer.begin(cfg, true);   // true = habilita o teclado
     M5Cardputer.Display.setRotation(1);
@@ -54,7 +67,14 @@ void setup() {
     M5Cardputer.Display.setBrightness((uint8_t)(b * 255 / 100));
 
     randomSeed(micros());
-    ui::init();
+    bool spriteOk = ui::init();
+
+    delay(200);
+    Serial.println();
+    Serial.println("========== NOIR OS ==========");
+    Serial.printf("Boot OK. Canvas (sprite 240x135): %s\n", spriteOk ? "alocado" : "FALHOU!");
+    Serial.printf("Heap livre pos-init: %u bytes\n", (unsigned)ESP.getFreeHeap());
+
     splash();
 
     // Tenta reconectar no WiFi salvo e acertar o relogio (nao bloqueia o boot
@@ -62,7 +82,13 @@ void setup() {
     noir::timeservice::begin();
     if (noir::wifi::connectSaved(true, 8000)) {
         noir::timeservice::sync(6000);
+        Serial.printf("WiFi conectado. IP: %s\n", noir::wifi::ip().c_str());
+    } else {
+        Serial.println("WiFi: sem rede salva (configure em Config > WiFi).");
     }
+
+    Serial.println("Entrando no launcher (dashboard). ENTER abre o menu.");
+    xTaskCreate(heartbeatTask, "hb", 3072, nullptr, 1, nullptr);
 }
 
 void loop() {
