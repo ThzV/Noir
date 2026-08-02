@@ -430,8 +430,12 @@ String sanitize(const String& s) {
 }
 
 // Entradas -> texto plano. Cada linha: "K\tTITULO\tSEGREDO".
+// A 1a linha "V1" e' um cabecalho de versao que garante que o texto cifrado
+// NUNCA seja vazio: cifrar plaintext de tamanho ZERO com AES-GCM e' um caso-
+// limite que pode falhar (e ai o cofre nao persistia e voltava a pedir para
+// criar). O parse() ignora esta linha (ela nao tem os 2 tabs esperados).
 String serialize() {
-    String s;
+    String s = "V1\n";
     for (const auto& e : g_entries) {
         s += e.kind; s += '\t'; s += e.title; s += '\t'; s += e.secret; s += '\n';
     }
@@ -581,10 +585,18 @@ bool vaultEnsureUnlocked() {
         bool ok = true;
         String p1 = ui::textInput("Nova senha-mestra", "", true, &ok);
         if (!ok) return false;
-        if (p1.length() < 8) { wipe(p1); ui::redStripe("Senha muito curta (min 8)"); return false; }
+        if (p1.length() < 8) {
+            wipe(p1);
+            ui::messageBox("Cofre", "Senha-mestra curta demais.\nUse ao menos 8 caracteres\ne tente de novo.");
+            return false;
+        }
         String p2 = ui::textInput("Repita a senha", "", true, &ok);
         if (!ok) { wipe(p1); return false; }
-        if (p1 != p2) { wipe(p1); wipe(p2); ui::redStripe("Senhas diferentes"); return false; }
+        if (p1 != p2) {
+            wipe(p1); wipe(p2);
+            ui::messageBox("Cofre", "As duas senhas nao\nbatem. Tente de novo.");
+            return false;
+        }
 
         uint8_t salt[16];
         fillRandom(salt, 16);
@@ -603,10 +615,21 @@ bool vaultEnsureUnlocked() {
             noir::config::remove("sec_vault");
             noir::config::remove("sec_ctr");
             vaultLock();
-            ui::redStripe("Falha ao criar cofre");
+            ui::messageBox("Cofre", "Falha ao gravar o cofre\n(cripto/NVS). Nada foi\nsalvo. Tente de novo.");
             return false;
         }
         noir::config::setStr("sec_salt", b64encode(salt, 16));
+
+        // Verifica que o salt REALMENTE persistiu. Se nao persistir, o proximo
+        // acesso acharia que nao ha cofre e pediria para criar de novo -- entao
+        // avisamos aqui em vez de deixar o cofre "sumir".
+        if (noir::config::getStr("sec_salt", "").length() == 0) {
+            noir::config::remove("sec_vault");
+            noir::config::remove("sec_ctr");
+            vaultLock();
+            ui::messageBox("Cofre", "Nao consegui persistir o\ncofre na NVS. Verifique\no armazenamento.");
+            return false;
+        }
         return true;
     }
 
