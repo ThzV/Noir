@@ -24,20 +24,21 @@ static void splash() {
     ui::clearNoir();
     d.setTextDatum(middle_center);
 
+    // Emblema da aranha (vermelho Spider-Noir) acima do titulo.
+    ui::drawSpider(noir::SCREEN_W / 2, 32, 12, noir::RED);
+
     d.setFont(&fonts::Font0);
-    d.setTextSize(1);
-    d.setTextColor(noir::STEEL, noir::BLACK);
-    d.drawString("M5 CARDPUTER v1.1", noir::SCREEN_W / 2, 30);
-
+    d.setTextSize(4);
     d.setTextColor(noir::WHITE, noir::BLACK);
-    d.setTextSize(5);
-    d.drawString("NOIR", noir::SCREEN_W / 2, 72);
+    d.drawString("NOIR", noir::SCREEN_W / 2, 70);
     d.setTextSize(1);
 
-    d.fillRect(noir::SCREEN_W / 2 - 22, 96, 44, 3, noir::BLOOD);   // acento
+    d.fillRect(noir::SCREEN_W / 2 - 48, 88, 96, 2, noir::RED);   // linha de acento
 
+    d.setTextColor(noir::RED, noir::BLACK);
+    d.drawString("SPIDER NOIR OS", noir::SCREEN_W / 2, 100);
     d.setTextColor(noir::STEEL, noir::BLACK);
-    d.drawString("cybertools . spider-noir", noir::SCREEN_W / 2, 116);
+    d.drawString("with great power...", noir::SCREEN_W / 2, 118);
     ui::present();
     delay(1600);
 }

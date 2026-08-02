@@ -9,7 +9,7 @@ sao `danger=false`.
 Arquivos:
 
 - `src/apps/seguranca/seguranca.h` — contrato de exportacao (`SEGURANCA_APPS[]`).
-- `src/apps/seguranca/seguranca.cpp` — helpers de cripto + os 5 apps.
+- `src/apps/seguranca/seguranca.cpp` — helpers de cripto + os 6 apps.
 
 Toda a criptografia usa o **mbedtls** que ja vem no core do ESP32 (nao ha
 dependencia PlatformIO nova). O QR e desenho nativo da M5GFX.
@@ -217,6 +217,47 @@ Isto e um cofre **pessoal, para estudo**, nao grau militar:
   (contador monotonico `sec_ctr` nos 8 primeiros bytes + 4 bytes aleatorios),
   entao a colisao nao depende da qualidade do RNG — importante num app offline em
   que o TRNG pode nao ter entropia de RF. Ver "Nonce unico por CONSTRUCAO".
+
+## 6) Cofre: Backup / Restauracao (SD)
+
+Copia as **3 chaves do cofre** entre a NVS e um arquivo texto no cartao SD
+(`/noir/cofre.bak`), para nao perder os segredos se a NVS for apagada (reflash,
+`nvs erase`, troca de placa).
+
+**Por que o arquivo e seguro.** Nada e decifrado no backup. As 3 chaves ja sao,
+por natureza, ou publicas ou ja cifradas:
+
+- `sec_salt` — salt do PBKDF2 (publico por design);
+- `sec_vault` — `IV || TAG || CIPHERTEXT` do AES-256-GCM (ja cifrado);
+- `sec_ctr` — contador monotonico do nonce (nao secreto).
+
+Sem a **senha-mestra** original, o arquivo e inutil (a chave AES so sai do
+PBKDF2 da senha). Por isso guardamos em texto simples, uma chave por linha:
+
+```
+salt=<base64>
+vault=<base64>
+ctr=<decimal>
+```
+
+**SD do Cardputer.** Igual ao modulo Arquivos: barramento SPI dedicado
+`SCLK=40 MISO=39 MOSI=14 CS=12`, `SPI.begin(40,39,14,12)` + `SD.begin(12, SPI)`.
+Por isso `<SPI.h>`/`<SD.h>` sao incluidos **antes** de `ui/theme.h` (senao o
+M5GFX nao habilita o SDFS). Sem cartao, `ui::messageBox` avisa.
+
+- **Backup p/ SD:** le as 3 chaves da NVS, cria `/noir` se preciso e grava o
+  arquivo (`FILE_WRITE` trunca). Se nao houver cofre criado (`sec_salt` vazio),
+  avisa em vez de gerar backup vazio. Sucesso confirmado com `ui::messageBox`.
+- **Restaurar do SD:** le e faz *parse* de `chave=valor` (tolera CRLF), exige as
+  chaves minimas (`salt`+`vault`) e **sobrescreve** a NVS via `config::setStr`.
+  Como e destrutivo (apaga o cofre atual do aparelho), passa por
+  `ui::confirm(..., danger=true)`. Depois chama `vaultLock()` para descartar
+  qualquer chave/estado que estivesse em RAM — assim o proximo acesso ao Cofre
+  re-deriva a chave a partir do blob restaurado, e o usuario desbloqueia com a
+  **senha-mestra do backup**.
+
+Este app **nao transmite** e so escreve apos confirmacao, entao fica
+`danger=false` na barra (a acao destrutiva ja e protegida pelo `confirm` interno).
 
 ## Armadilhas que valem lembrar
 

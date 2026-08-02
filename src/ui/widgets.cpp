@@ -62,8 +62,8 @@ bool confirm(const char* title, const String& msg, bool danger) {
         for (int i = 0; i < 2; i++) {
             int bx = (i == 0) ? 16 : noir::SCREEN_W - 16 - bw;
             bool on = (i == sel);
-            uint16_t fill = on ? ((danger && i == 1) ? noir::BLOOD : noir::WHITE) : noir::INK;
-            uint16_t fg   = on ? ((danger && i == 1) ? noir::WHITE : noir::BLACK) : noir::BONE;
+            uint16_t fill = on ? noir::RED : noir::INK;
+            uint16_t fg   = on ? noir::WHITE : noir::BONE;
             d.fillRect(bx, by, bw, bh, fill);
             d.drawRect(bx, by, bw, bh, noir::ASH);
             d.setFont(&fonts::Font2);
@@ -159,10 +159,10 @@ int listView(const char* title, const std::vector<String>& items, int start, int
             bool danger = (dangerFrom >= 0 && idx >= dangerFrom);
 
             if (on) {
-                d.fillRect(6, y, noir::SCREEN_W - 12, rowH - 2, danger ? noir::BLOOD : noir::WHITE);
-                d.setTextColor(danger ? noir::WHITE : noir::BLACK, danger ? noir::BLOOD : noir::WHITE);
+                d.fillRect(6, y, noir::SCREEN_W - 12, rowH - 2, noir::RED);
+                d.setTextColor(noir::WHITE, noir::RED);
             } else {
-                d.setTextColor(danger ? noir::BLOOD : noir::BONE, noir::BLACK);
+                d.setTextColor(danger ? noir::RED : noir::BONE, noir::BLACK);
             }
             d.setTextDatum(middle_left);
             d.drawString(items[idx].c_str(), 12, y + (rowH - 2) / 2);
@@ -209,7 +209,7 @@ void progress(const char* title, const String& label, int pct) {
 
     const int bx = 20, by = 78, bw = noir::SCREEN_W - 40, bh = 16;
     d.drawRect(bx, by, bw, bh, noir::BONE);
-    d.fillRect(bx + 2, by + 2, (bw - 4) * pct / 100, bh - 4, noir::WHITE);
+    d.fillRect(bx + 2, by + 2, (bw - 4) * pct / 100, bh - 4, noir::RED);
 
     d.setFont(&fonts::Font0);
     d.setTextDatum(middle_center);

@@ -1,11 +1,10 @@
-// Noir OS  -  Barra de status (bateria, titulo, WiFi, relogio, alerta TX)
+// Noir OS  -  Barra de status (estilo Spider-Noir: aranha + wifi/bateria)
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "ui/statusbar.h"
 #include "ui/theme.h"
 #include "core/app.h"
 #include "core/time_service.h"
 #include <WiFi.h>
-#include <cstdio>
 
 namespace ui {
 
@@ -15,37 +14,37 @@ void statusBar(const char* title) {
     const bool tx = noir::txActive();
 
     d.fillRect(0, 0, noir::SCREEN_W, noir::STATUSBAR_H, noir::INK);
-    d.drawFastHLine(0, noir::STATUSBAR_H, noir::SCREEN_W, tx ? noir::BLOOD : noir::ASH);
+    d.drawFastHLine(0, noir::STATUSBAR_H, noir::SCREEN_W, tx ? noir::RED : noir::RED);
+
+    // --- Esquerda: emblema da aranha (vermelho) + titulo da tela ---
+    drawSpider(7, cy, 4, noir::RED);
     d.setFont(&fonts::Font0);
-
-    // Bateria (esquerda).
-    int batt = M5.Power.getBatteryLevel();
     d.setTextDatum(middle_left);
-    d.setTextColor((batt >= 0 && batt < 15) ? noir::BLOOD : noir::BONE, noir::INK);
-    char b[16];
-    if (batt < 0) std::snprintf(b, sizeof(b), "BAT --");
-    else          std::snprintf(b, sizeof(b), "BAT %d%%", batt);
-    d.drawString(b, 4, cy);
+    d.setTextColor(noir::BONE, noir::INK);
+    d.drawString(title, 15, cy);
 
-    // Titulo (centro).
-    d.setTextDatum(middle_center);
-    d.setTextColor(noir::WHITE, noir::INK);
-    d.drawString(title, noir::SCREEN_W / 2, cy);
-
-    // Relogio (direita).
+    // --- Direita: relogio, bateria, wifi (da borda para dentro) ---
     d.setTextDatum(middle_right);
     d.setTextColor(noir::BONE, noir::INK);
-    d.drawString(noir::timeservice::hhmm().c_str(), noir::SCREEN_W - 4, cy);
+    d.drawString(noir::timeservice::hhmm().c_str(), noir::SCREEN_W - 2, cy);
 
-    // Indicador de WiFi (bolinha).
+    int batt = M5.Power.getBatteryLevel();
+    uint16_t battCor = (batt >= 0 && batt < 15) ? noir::RED : noir::BONE;
+    drawBattery(noir::SCREEN_W - 44, cy - 4, batt < 0 ? 0 : batt, battCor);
+
     bool wifi = (WiFi.status() == WL_CONNECTED);
-    d.fillCircle(noir::SCREEN_W - 42, cy, 2, wifi ? noir::BONE : noir::ASH);
+    int level = 0;
+    if (wifi) {
+        int r = WiFi.RSSI();
+        level = (r >= -60) ? 3 : (r >= -72) ? 2 : 1;
+    }
+    drawWifiBars(noir::SCREEN_W - 58, cy + 4, level, noir::BONE, noir::ASH);
 
-    // Alerta de transmissao ativa.
+    // --- Alerta de transmissao ativa (pisca em vermelho vivo) ---
     if (tx) {
         d.setTextDatum(middle_right);
-        d.setTextColor(noir::BLOOD, noir::INK);
-        d.drawString("TX", noir::SCREEN_W - 52, cy);
+        d.setTextColor(noir::RED, noir::INK);
+        d.drawString("TX", noir::SCREEN_W - 66, cy);
     }
 }
 

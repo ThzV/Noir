@@ -65,16 +65,40 @@ void appAbout() {
     ui::banner("Sobre", "NOIR", "v0.1  -  AGPL-3.0");
 }
 
+// Ajusta o screensaver e o repouso (ciclando por presets).
+void appScreensaver() {
+    static const int OPI[] = {0, 15, 30, 60, 120};    // ocio -> screensaver
+    static const int OPS[] = {0, 30, 60, 120, 300};   // ocio no screensaver -> repouso
+    for (;;) {
+        int idle = noir::config::getInt("ss_idle", 30);
+        int slp  = noir::config::getInt("ss_sleep", 60);
+        std::vector<String> itens = {
+            String("Screensaver: ") + (idle == 0 ? String("OFF") : (String(idle) + "s")),
+            String("Repouso apos: ") + (slp == 0 ? String("nunca") : (String(slp) + "s")),
+        };
+        int r = ui::listView("Tela / repouso", itens);
+        if (r < 0) return;
+        if (r == 0) {
+            int i = 0; while (i < 5 && OPI[i] != idle) ++i;
+            noir::config::setInt("ss_idle", OPI[(i + 1) % 5]);
+        } else {
+            int i = 0; while (i < 5 && OPS[i] != slp) ++i;
+            noir::config::setInt("ss_sleep", OPS[(i + 1) % 5]);
+        }
+    }
+}
+
 } // namespace
 
 namespace apps {
 namespace config {
 
 const noir::AppEntry CONFIG_APPS[] = {
-    {"WiFi",         "rede", appWifi,       false},
-    {"Brilho",       "tela", appBrightness, false},
-    {"Fuso horario", "hora", appTimezone,   false},
-    {"Sobre",        "info", appAbout,      false},
+    {"WiFi",          "rede", appWifi,        false},
+    {"Brilho",        "tela", appBrightness,  false},
+    {"Tela / repouso","ss",   appScreensaver, false},
+    {"Fuso horario",  "hora", appTimezone,    false},
+    {"Sobre",         "info", appAbout,       false},
 };
 const int CONFIG_APPS_COUNT = sizeof(CONFIG_APPS) / sizeof(CONFIG_APPS[0]);
 

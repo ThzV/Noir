@@ -25,7 +25,8 @@ constexpr uint16_t ASH   = rgb565(58,  58,  58);   // linhas sutis / desabilitad
 constexpr uint16_t STEEL = rgb565(122, 122, 122);  // texto secundario
 constexpr uint16_t BONE  = rgb565(214, 214, 214);  // texto principal (branco "sujo")
 constexpr uint16_t WHITE = rgb565(255, 255, 255);  // destaque / item selecionado
-constexpr uint16_t BLOOD = rgb565(139, 0,   0);    // ACENTO: perigo / TX ativo
+constexpr uint16_t RED   = rgb565(214, 34,  40);   // ACENTO DE MARCA Spider-Noir (headers, selecao, aranha)
+constexpr uint16_t BLOOD = rgb565(139, 0,   0);    // vermelho escuro: perigo / TX ativo (fundo)
 
 // ---- Layout -------------------------------------------------------------
 constexpr int SCREEN_W    = 240;

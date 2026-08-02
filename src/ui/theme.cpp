@@ -62,4 +62,36 @@ void panel(int x, int y, int w, int h, const char* title) {
     }
 }
 
+void drawSpider(int cx, int cy, int r, uint16_t color) {
+    // Corpo: abdomen (maior, embaixo) + cabeca (menor, em cima).
+    s_canvas->fillCircle(cx, cy + r / 4, r / 2, color);
+    s_canvas->fillCircle(cx, cy - r / 3, r / 3, color);
+    // 4 pernas de cada lado, com uma "dobra" (joelho).
+    for (int i = 0; i < 4; ++i) {
+        int ky   = cy - r / 3 + i * (2 * r / 3) / 3;
+        int knee = r * 2 / 3;
+        s_canvas->drawLine(cx - r / 3, ky, cx - knee, ky - r / 3, color);
+        s_canvas->drawLine(cx - knee, ky - r / 3, cx - knee - r / 3, ky + r / 4, color);
+        s_canvas->drawLine(cx + r / 3, ky, cx + knee, ky - r / 3, color);
+        s_canvas->drawLine(cx + knee, ky - r / 3, cx + knee + r / 3, ky + r / 4, color);
+    }
+}
+
+void drawWifiBars(int x, int yBase, int level, uint16_t on, uint16_t off) {
+    for (int i = 0; i < 3; ++i) {
+        int h  = 3 + i * 3;
+        int bx = x + i * 4;
+        s_canvas->fillRect(bx, yBase - h, 2, h, (i < level) ? on : off);
+    }
+}
+
+void drawBattery(int x, int y, int pct, uint16_t color) {
+    const int w = 16, h = 8;
+    if (pct < 0)   pct = 0;
+    if (pct > 100) pct = 100;
+    s_canvas->drawRect(x, y, w, h, color);
+    s_canvas->fillRect(x + w, y + 2, 2, h - 4, color);        // "pino" +
+    s_canvas->fillRect(x + 1, y + 1, (w - 2) * pct / 100, h - 2, color);
+}
+
 } // namespace ui

@@ -12,6 +12,7 @@
 #include "apps/seguranca/seguranca.h"
 #include "apps/arquivos/arquivos.h"
 #include "apps/produtividade/produtividade.h"
+#include "apps/ferramentas/ferramentas.h"
 
 namespace noir {
 
@@ -52,6 +53,12 @@ const std::vector<CategoryRT>& registry() {
     {
         CategoryRT c{"Produtividade", "tempo", {}};
         append(c.apps, apps::produtividade::PRODUTIVIDADE_APPS, apps::produtividade::PRODUTIVIDADE_APPS_COUNT);
+        cats.push_back(c);
+    }
+    // --- Ferramentas (I2C / Grove / Unit RTC) ---
+    {
+        CategoryRT c{"Ferramentas", "i2c", {}};
+        append(c.apps, apps::ferramentas::FERRAMENTAS_APPS, apps::ferramentas::FERRAMENTAS_APPS_COUNT);
         cats.push_back(c);
     }
     // --- Config: ajustes do nucleo + configuracao de Clima (Home) ---

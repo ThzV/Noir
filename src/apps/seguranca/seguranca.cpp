@@ -10,6 +10,7 @@
 //    3) QR Code            -> desenho nativo da M5GFX (gfx().qrcode()).
 //    4) TOTP (RFC 6238)    -> Base32 + HMAC-SHA1 (mbedtls), 6 digitos.
 //    5) Cofre criptografado-> PBKDF2 + AES-256-GCM (mbedtls), blob na NVS.
+//    6) Cofre: Backup      -> exporta/importa as chaves do cofre para o SD.
 //
 //  Toda a criptografia usa o mbedtls que ja' vem no core do ESP32 (nao ha
 //  dependencia externa). O codigo e' propositalmente comentado para servir
@@ -17,6 +18,12 @@
 //
 //  SPDX-License-Identifier: AGPL-3.0-or-later
 // ============================================================================
+// IMPORTANTE: SPI/SD ANTES de qualquer header que puxe o M5GFX (ui/theme.h ->
+// M5Cardputer.h). O M5GFX so' habilita o suporte a SD (SDFS) se <SD.h> ja' tiver
+// sido incluido antes. Usado pelo app "Cofre: Backup". (Veja arquivos.cpp.)
+#include <SPI.h>
+#include <SD.h>
+
 #include "apps/seguranca/seguranca.h"
 
 #include "ui/theme.h"       // ui::gfx(), clearNoir(), present(), cores noir::*
@@ -844,6 +851,155 @@ void appCofre() {
     }
 }
 
+// ============================================================================
+//  APP 6  -  Cofre: Backup / Restauracao (cartao SD)
+//
+//  Copia as 3 chaves do cofre entre a NVS e um arquivo texto no SD
+//  (/noir/cofre.bak). Nada aqui e decifrado: o "vault" ja e ciphertext
+//  AES-GCM, e o "salt"/"ctr" sao publicos por natureza. Logo o arquivo de
+//  backup e seguro de guardar (so serve com a senha-mestra original). Este app
+//  nao transmite RF: danger=false. As escritas destrutivas (restaurar) pedem
+//  ui::confirm(..., danger=true).
+//
+//  As 3 chaves NVS (ver "COFRE CRIPTOGRAFADO"):
+//    sec_salt  -> Base64 do salt (16 bytes) do PBKDF2
+//    sec_vault -> Base64 de (IV || TAG || CIPHERTEXT)
+//    sec_ctr   -> contador monotonico decimal do nonce GCM
+// ============================================================================
+
+// Caminho fixo do arquivo de backup.
+const char* BACKUP_DIR  = "/noir";
+const char* BACKUP_PATH = "/noir/cofre.bak";
+
+// Garante o SD montado. Igual ao padrao de arquivos.cpp: o SPI so precisa ser
+// configurado uma vez; SD.end() antes de begin() forca re-montagem (permite
+// trocar o cartao a quente). Retorna false se nao houver cartao.
+bool backupEnsureSD() {
+    static bool spiStarted = false;
+    if (!spiStarted) {
+        SPI.begin(40, 39, 14, 12);   // SCLK, MISO, MOSI, CS
+        spiStarted = true;
+    }
+    SD.end();
+    if (!SD.begin(12, SPI)) return false;
+    return SD.cardType() != CARD_NONE;
+}
+
+// Grava as 3 chaves do cofre em /noir/cofre.bak (texto simples).
+void backupToSD() {
+    if (!backupEnsureSD()) {
+        ui::messageBox("Backup", "Sem cartao SD.\nInsira um cartao e\ntente novamente.");
+        return;
+    }
+    noir::config::begin();
+
+    // Sem cofre criado ainda? Nao ha o que salvar.
+    String salt  = noir::config::getStr("sec_salt", "");
+    String vault = noir::config::getStr("sec_vault", "");
+    String ctr   = noir::config::getStr("sec_ctr", "0");
+    if (salt.length() == 0 || vault.length() == 0) {
+        ui::messageBox("Backup", "Nenhum cofre para\nfazer backup. Crie o\ncofre primeiro.");
+        return;
+    }
+
+    // Garante a pasta /noir.
+    if (!SD.exists(BACKUP_DIR) && !SD.mkdir(BACKUP_DIR)) {
+        ui::redStripe("Falha ao criar /noir");
+        return;
+    }
+
+    // Monta o conteudo: uma chave por linha. O vault ja e ciphertext, entao o
+    // arquivo e seguro de guardar (so serve com a senha-mestra original).
+    String out;
+    out += "salt=";  out += salt;  out += '\n';
+    out += "vault="; out += vault; out += '\n';
+    out += "ctr=";   out += ctr;   out += '\n';
+
+    File w = SD.open(BACKUP_PATH, FILE_WRITE);   // FILE_WRITE trunca
+    if (!w) { ui::redStripe("Falha ao abrir arquivo"); return; }
+    size_t n = w.write((const uint8_t*)out.c_str(), out.length());
+    w.close();
+    if (n != out.length()) { ui::redStripe("Falha ao gravar (SD cheio?)"); return; }
+
+    ui::messageBox("Backup", String("Cofre salvo em\n") + BACKUP_PATH +
+                             "\n\nGuarde bem: so abre\ncom a senha-mestra.");
+}
+
+// Le /noir/cofre.bak, faz parse das 3 chaves e regrava na NVS (sobrescreve o
+// cofre atual). Pede confirmacao (perigo) antes.
+void restoreFromSD() {
+    if (!backupEnsureSD()) {
+        ui::messageBox("Restaurar", "Sem cartao SD.\nInsira um cartao e\ntente novamente.");
+        return;
+    }
+    if (!SD.exists(BACKUP_PATH)) {
+        ui::messageBox("Restaurar", String("Arquivo nao existe:\n") + BACKUP_PATH +
+                                    "\nFaca um backup antes.");
+        return;
+    }
+
+    // Le o arquivo inteiro (o backup e pequeno: 3 linhas curtas).
+    File f = SD.open(BACKUP_PATH, FILE_READ);
+    if (!f) { ui::redStripe("Falha ao ler arquivo"); return; }
+    String buf;
+    buf.reserve(f.size() + 1);
+    while (f.available()) buf += (char)f.read();
+    f.close();
+
+    // Parse linha a linha: "chave=valor". Tolera CRLF do Windows.
+    String salt, vault, ctr;
+    int start = 0;
+    while (start < (int)buf.length()) {
+        int nl = buf.indexOf('\n', start);
+        if (nl < 0) nl = buf.length();
+        String line = buf.substring(start, nl);
+        start = nl + 1;
+        line.replace("\r", "");
+        int eq = line.indexOf('=');
+        if (eq < 0) continue;
+        String k = line.substring(0, eq);
+        String v = line.substring(eq + 1);
+        if      (k == "salt")  salt  = v;
+        else if (k == "vault") vault = v;
+        else if (k == "ctr")   ctr   = v;
+    }
+
+    if (salt.length() == 0 || vault.length() == 0) {
+        ui::messageBox("Restaurar", "Backup invalido ou\nincompleto (faltam\nsalt/vault).");
+        return;
+    }
+    if (ctr.length() == 0) ctr = "0";   // contador ausente = comeca do zero
+
+    // Sobrescreve o cofre atual: acao destrutiva -> confirma em vermelho.
+    if (!ui::confirm("Restaurar cofre",
+                     "Isto SOBRESCREVE o\ncofre atual deste\naparelho. Continuar?", true)) {
+        return;
+    }
+
+    noir::config::begin();
+    noir::config::setStr("sec_salt",  salt);
+    noir::config::setStr("sec_vault", vault);
+    noir::config::setStr("sec_ctr",   ctr);
+
+    // Se havia um cofre destravado em RAM, ele agora nao corresponde ao blob
+    // restaurado: travamos para forcar um novo desbloqueio (com a senha do
+    // backup) na proxima abertura do Cofre.
+    vaultLock();
+
+    ui::messageBox("Restaurar", "Cofre restaurado.\nAbra o Cofre e\ndesbloqueie com a\nsenha-mestra do backup.");
+}
+
+// App: menu de duas opcoes (backup / restaurar).
+void appBackup() {
+    for (;;) {
+        int r = ui::listView("Cofre: Backup",
+                             {"Backup p/ SD", "Restaurar do SD"}, 0, 1 /* restaurar = perigo */);
+        if (r < 0) return;
+        if (r == 0)      backupToSD();
+        else if (r == 1) restoreFromSD();
+    }
+}
+
 } // namespace anonimo
 
 // ============================================================================
@@ -855,6 +1011,7 @@ const noir::AppEntry SEGURANCA_APPS[] = {
     { "QR Code",          "qr",    appQr,      false },
     { "TOTP 2FA",         "otp",   appTotp,    false },
     { "Cofre",            "aes",   appCofre,   false },
+    { "Cofre: Backup",    "bak",   appBackup,  false },
 };
 const int SEGURANCA_APPS_COUNT =
     (int)(sizeof(SEGURANCA_APPS) / sizeof(SEGURANCA_APPS[0]));

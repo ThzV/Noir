@@ -27,6 +27,7 @@
 #include "core/wifi_service.h"
 #include "core/time_service.h"
 #include "core/net.h"
+#include "core/screensaver.h"
 #include "ui/theme.h"
 #include "ui/statusbar.h"
 #include "ui/widgets.h"
@@ -305,11 +306,13 @@ void runDashboard() {
     maybeFetchWeather(false, draw);
 
     draw();
-    uint32_t lastClock = millis();
+    uint32_t lastClock    = millis();
+    uint32_t lastActivity = millis();
 
     // ---- Loop principal da tela inicial -----------------------------------
     for (;;) {
         ui::KeyEvent e = ui::readKey();
+        if (e.key != ui::Key::None) lastActivity = millis();   // qualquer tecla reseta o ocio
 
         // ENTER: sai do dashboard -> o launcher abre o menu.
         if (e.key == ui::Key::Enter) return;
@@ -328,6 +331,15 @@ void runDashboard() {
             maybeFetchWeather(false, draw);
             draw();
             lastClock = millis();
+        }
+
+        // Screensaver ao ficar ocioso (config "ss_idle"; 0 = desligado).
+        int ssIdle = noir::screensaver::idleSeconds();
+        if (ssIdle > 0 && (millis() - lastActivity) >= (uint32_t)ssIdle * 1000) {
+            noir::screensaver::run();     // bloqueia ate' tecla; restaura o brilho
+            lastActivity = millis();
+            lastClock    = millis();
+            draw();
         }
 
         delay(10);   // cede CPU (evita busy-loop de 100%)
