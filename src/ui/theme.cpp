@@ -63,17 +63,37 @@ void panel(int x, int y, int w, int h, const char* title) {
 }
 
 void drawSpider(int cx, int cy, int r, uint16_t color) {
-    // Corpo: abdomen (maior, embaixo) + cabeca (menor, em cima).
-    s_canvas->fillCircle(cx, cy + r / 4, r / 2, color);
-    s_canvas->fillCircle(cx, cy - r / 3, r / 3, color);
-    // 4 pernas de cada lado, com uma "dobra" (joelho).
+    // Emblema estilo Homem-Aranha: corpo esguio (cabeca + abdomen alongado) e
+    // 8 pernas longas e anguladas que se abrem (as de cima sobem, as de baixo
+    // descem, como o simbolo classico).
+    auto seg = [&](int x0, int y0, int x1, int y1) {
+        s_canvas->drawLine(x0, y0, x1, y1, color);
+        if (r >= 7) s_canvas->drawLine(x0, y0 + 1, x1, y1 + 1, color);   // engrossa
+    };
+
+    // Corpo (cabeca em cima + abdomen alongado embaixo).
+    int rx = (r * 2) / 6; if (rx < 1) rx = 1;
+    int ry = (r * 3) / 5; if (ry < 1) ry = 1;
+    s_canvas->fillEllipse(cx, cy + r / 6, rx, ry, color);
+    int hr = (r + 2) / 4; if (hr < 1) hr = 1;
+    s_canvas->fillCircle(cx, cy - (r * 3) / 5, hr, color);
+
+    // Pernas: {joelhoX, joelhoY, peX, peY} em decimos de r (lado esquerdo).
+    static const int L[4][4] = {
+        { -7, -7, -15, -11 },   // par superior: sobe e abre
+        { -8, -2, -16,  -4 },
+        { -8,  3, -16,   5 },
+        { -7,  7, -14,  12 },   // par inferior: desce e abre
+    };
     for (int i = 0; i < 4; ++i) {
-        int ky   = cy - r / 3 + i * (2 * r / 3) / 3;
-        int knee = r * 2 / 3;
-        s_canvas->drawLine(cx - r / 3, ky, cx - knee, ky - r / 3, color);
-        s_canvas->drawLine(cx - knee, ky - r / 3, cx - knee - r / 3, ky + r / 4, color);
-        s_canvas->drawLine(cx + r / 3, ky, cx + knee, ky - r / 3, color);
-        s_canvas->drawLine(cx + knee, ky - r / 3, cx + knee + r / 3, ky + r / 4, color);
+        int kx = (L[i][0] * r) / 10, ky = (L[i][1] * r) / 10;
+        int fx = (L[i][2] * r) / 10, fy = (L[i][3] * r) / 10;
+        int ax = (r * 2) / 10;                 // fixacao junto ao corpo
+        int ay = (L[i][1] * r) / 20;
+        seg(cx - ax, cy + ay, cx + kx, cy + ky);   // coxa (esq)
+        seg(cx + kx, cy + ky, cx + fx, cy + fy);   // canela (esq)
+        seg(cx + ax, cy + ay, cx - kx, cy + ky);   // coxa (dir, espelhada)
+        seg(cx - kx, cy + ky, cx - fx, cy + fy);   // canela (dir)
     }
 }
 
