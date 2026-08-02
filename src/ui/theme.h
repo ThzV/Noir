@@ -33,4 +33,13 @@ void drawVignette();
 // Painel com borda grossa estilo "quadro de HQ".
 void panel(int x, int y, int w, int h, const char* title);
 
+// Emblema da aranha (Spider-Noir): corpo + 8 pernas, desenhado com primitivas.
+void drawSpider(int cx, int cy, int r, uint16_t color);
+
+// Icone de WiFi: 3 barras crescentes; 'level' 0..3 acesas em 'on', resto 'off'.
+void drawWifiBars(int x, int yBase, int level, uint16_t on, uint16_t off);
+
+// Icone de bateria com nivel proporcional a 'pct' (0..100).
+void drawBattery(int x, int y, int pct, uint16_t color);
+
 } // namespace ui

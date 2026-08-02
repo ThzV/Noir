@@ -11,13 +11,13 @@
 
 ---
 
-> ⚠️ **Projeto em construção.** Este repositório contém, hoje, a **documentação completa** de como construir o Noir e um **esqueleto de firmware que já compila e dá flash** (splash + home + menu navegável). Os módulos são implementados por fases — veja o **[ROADMAP](ROADMAP.md)**.
+> ✅ **Status: v0.1 — todos os módulos implementados; o firmware compila e linka** (`pio run` gera `firmware.bin`; RAM ~17%, Flash ~50% do slot de app). ⚠️ Ainda **não validado em hardware real** — pode precisar de ajustes ao rodar no Cardputer. Guias do código em **[docs/implementacao/](docs/implementacao/README.md)** e plano em **[ROADMAP](ROADMAP.md)**.
 
 ## O que é
 
 O **Noir** transforma o Cardputer num pequeno "sistema operacional": uma *home* com relógio/clima/status e um *launcher* com apps organizados em seis áreas — tudo vestido de **preto e branco de alto contraste, textura de filme e um único acento de cor** (vermelho = transmissão ativa / perigo).
 
-## Recursos planejados
+## Recursos (implementados em v0.1)
 
 | Área | Módulos |
 |---|---|
